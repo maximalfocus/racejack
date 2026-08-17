@@ -123,6 +123,20 @@ services:
       <<: *runner-env
     command: ["python", "-m", "racejack.demo"]
 
+  # The concurrent load harness. Generates genuine concurrent load against our own services
+  # only, bounded by explicit configuration, and writes its transcript to ./artifacts.
+  harness:
+    <<: [*hardening, *runner]
+    environment:
+      <<: *runner-env
+      RACEJACK_ORDER_CONCURRENCY: "${RACEJACK_ORDER_CONCURRENCY:-60}"
+      RACEJACK_REDEMPTION_CONCURRENCY: "${RACEJACK_REDEMPTION_CONCURRENCY:-40}"
+      RACEJACK_ROUNDS: "${RACEJACK_ROUNDS:-3}"
+      RACEJACK_TRANSCRIPT_PATH: /artifacts/harness-transcript.txt
+    volumes:
+      - ./artifacts:/artifacts
+    command: ["python", "-m", "racejack.harness"]
+
   # Ruff, mypy, and the test suite, through the same boundary as everything else.
   verify:
     <<: [*hardening, *runner]

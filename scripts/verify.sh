@@ -41,6 +41,10 @@ step "sequential demonstration, addressing one replica (the run parameter is rea
 docker compose run --rm --no-deps -T -e RACEJACK_REPLICAS=1 demo >/dev/null
 echo "one-replica run completed successfully"
 
+step "concurrent load harness: genuine concurrent load against our own services only"
+install -d -m 0777 artifacts
+docker compose run --rm --no-deps harness
+
 step "ruff, mypy, and the test suite, through the same boundary"
 docker compose run --rm --no-deps verify
 

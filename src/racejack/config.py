@@ -5,9 +5,14 @@ run parameters of the demo:
 
 * ``RACEJACK_COUNTER_GUARD`` selects which secure counter strategy an application replica uses by
   default. Both strategies are correct and produce identical client-visible outcomes.
-* ``RACEJACK_REPLICAS`` selects how many application replicas the demo runner addresses. The number
-  of processes that share the state is part of the mechanism this project exists to teach, so it is
-  a first-class parameter and not a deployment knob.
+* ``RACEJACK_REPLICAS`` selects how many application replicas a runner addresses. The number of
+  processes that share the state is part of the mechanism this project exists to teach, so it is a
+  first-class parameter and not a deployment knob.
+
+The harness parameters — ``RACEJACK_ORDER_CONCURRENCY``, ``RACEJACK_REDEMPTION_CONCURRENCY``, and
+``RACEJACK_ROUNDS`` — are demonstration parameters and explicit safety bounds at the same time. The
+load exists to expose a correctness defect, is aimed only at the demonstration's own services on a
+network with no egress, and is capped by the number of fictional buyers the fixtures define.
 """
 
 from __future__ import annotations
@@ -15,10 +20,25 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Final
+from pathlib import Path
+from typing import Any, Final
+
+from . import fixtures
 
 DEFAULT_DATABASE_URL: Final = "postgresql://racejack:racejack-demo-password@db:5432/racejack"
 DEFAULT_REPLICA_URLS: Final = ("http://app-a:8000", "http://app-b:8000")
+
+DEFAULT_ORDER_CONCURRENCY: Final = 60
+"""Sixty concurrent buyers against a twelve-unit drop, as the demonstration describes."""
+
+DEFAULT_REDEMPTION_CONCURRENCY: Final = 40
+"""Forty concurrent redemptions of one single-use code."""
+
+DEFAULT_ROUNDS: Final = 3
+MAX_ROUNDS: Final = 20
+MAX_CONCURRENCY: Final = fixtures.BUYER_COUNT
+"""A hard ceiling. The load is bounded by explicit configuration and aimed only at our own services;
+one distinct fictional buyer per concurrent request is both the point and the limit."""
 
 
 class CounterGuard(StrEnum):
@@ -101,4 +121,52 @@ class RunnerConfig:
             database_url=source.get("RACEJACK_DATABASE_URL", DEFAULT_DATABASE_URL),
             replica_urls=available[:replicas],
             request_timeout_seconds=float(source.get("RACEJACK_REQUEST_TIMEOUT_SECONDS", "30")),
+        )
+
+
+def _bounded_int(source: dict[str, str] | Any, name: str, default: int, ceiling: int) -> int:
+    raw = source.get(name, str(default))
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be an integer; got {raw!r}") from exc
+    if not 1 <= value <= ceiling:
+        raise ValueError(f"{name} must be between 1 and {ceiling}; got {value}")
+    return value
+
+
+@dataclass(frozen=True, slots=True)
+class HarnessConfig:
+    """Configuration for the concurrent load harness.
+
+    The concurrency levels and the round count are demonstration parameters and explicit safety
+    bounds at the same time: the load is generated only to expose a correctness defect, is aimed
+    only at the demonstration's own services, and can never exceed the number of fictional buyers
+    the fixtures define.
+    """
+
+    runner: RunnerConfig
+    order_concurrency: int
+    redemption_concurrency: int
+    rounds: int
+    transcript_path: Path
+
+    @classmethod
+    def from_env(cls, env: dict[str, str] | None = None) -> HarnessConfig:
+        source = os.environ if env is None else env
+        return cls(
+            runner=RunnerConfig.from_env(env),
+            order_concurrency=_bounded_int(
+                source, "RACEJACK_ORDER_CONCURRENCY", DEFAULT_ORDER_CONCURRENCY, MAX_CONCURRENCY
+            ),
+            redemption_concurrency=_bounded_int(
+                source,
+                "RACEJACK_REDEMPTION_CONCURRENCY",
+                DEFAULT_REDEMPTION_CONCURRENCY,
+                MAX_CONCURRENCY,
+            ),
+            rounds=_bounded_int(source, "RACEJACK_ROUNDS", DEFAULT_ROUNDS, MAX_ROUNDS),
+            transcript_path=Path(
+                source.get("RACEJACK_TRANSCRIPT_PATH", "/artifacts/harness-transcript.txt")
+            ),
         )

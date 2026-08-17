@@ -16,6 +16,7 @@ dependencies = [
 [project.scripts]
 racejack-seed = "racejack.seed:main"
 racejack-demo = "racejack.demo.__main__:main"
+racejack-harness = "racejack.harness.__main__:main"
 
 [dependency-groups]
 dev = [
