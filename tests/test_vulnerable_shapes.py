@@ -15,8 +15,8 @@ from racejack import fixtures, schema
 from racejack.config import HarnessConfig, RunnerConfig
 from racejack.db import connect
 from racejack.harness.burst import concurrent_burst
-from racejack.harness.engine import Harness
-from racejack.harness.ledger import ReproductionMode, Variant, Verdict
+from racejack.harness.engine import Expectation, Harness
+from racejack.harness.ledger import Invariant, ReproductionMode, Variant, Verdict
 from racejack.httpclient import StorefrontHTTP
 from racejack.instrumentation import GateSettings, arm_gate, disarm_gate, read_timeline
 from racejack.seed import prepare_secure_run, prepare_vulnerable_run, present_backstops
@@ -95,22 +95,25 @@ async def test_the_deterministic_mode_reproduces_both_overruns(
     ).run()
     failures = [check for check in report.checks if not check.passed]
     assert failures == [], "\n".join(f"{c.description}: {c.detail}" for c in failures)
-    assert report.rounds_with_a_violation == len(report.rounds)
-    assert all(
-        result.reconciliation.verdict is Verdict.INVARIANT_VIOLATED for result in report.rounds
-    )
 
-    counter_rounds = [r for r in report.rounds if r.reconciliation.ledger.orders_issued]
-    for result in counter_rounds:
-        led = result.reconciliation.ledger
-        assert led.orders_confirmed > led.units_available, "the drop was not oversold"
-        assert led.units_remaining < 0, "the store did not report a negative remaining count"
+    # Only the rounds that are *required* to reproduce. The ladder also contains a shape that must
+    # look fixed and a control that must be exactly correct, and neither may violate anything.
+    required = [
+        result
+        for result in report.rounds
+        if result.scenario.expectation is Expectation.DEFECT_REQUIRED
+    ]
+    assert required, "the deterministic ladder required nothing to reproduce"
+    assert all(result.reconciliation.verdict is Verdict.INVARIANT_VIOLATED for result in required)
 
-    redemption_rounds = [r for r in report.rounds if r.reconciliation.ledger.redemptions_issued]
-    for result in redemption_rounds:
+    for result in required:
         led = result.reconciliation.ledger
-        assert led.redemptions > 1, "the single-use code was not redeemed more than once"
-        assert led.wallet_balance_cents == led.redemptions * led.code_face_value_cents
+        if result.scenario.invariant is Invariant.COUNTER:
+            assert led.orders_confirmed > led.units_available, "the drop was not oversold"
+            assert led.units_remaining < 0, "the store did not report a negative remaining count"
+        else:
+            assert led.redemptions > 1, "the single-use code was not redeemed more than once"
+            assert led.wallet_balance_cents == led.redemptions * led.code_face_value_cents
 
 
 async def test_the_timeline_shows_requests_reading_the_same_value_before_either_wrote(

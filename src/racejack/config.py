@@ -52,6 +52,31 @@ class CounterGuard(StrEnum):
     """Every writer serializes on the drop row (SELECT ... FOR UPDATE) inside one transaction."""
 
 
+class VulnerableShape(StrEnum):
+    """The ladder of vulnerable shapes. Two are unguarded; two look like fixes and are not."""
+
+    UNGUARDED = "unguarded"
+    """A read, a decision, and a separate write. Nothing between them."""
+
+    PROCESS_LOCK = "process_lock"
+    """The same sequence inside an in-process lock: clean at one replica, broken at two."""
+
+    SINGLE_TRANSACTION = "single_transaction"
+    """The same sequence inside one transaction at READ COMMITTED: atomic, and still racing."""
+
+
+def parse_vulnerable_shape(
+    raw: str | None, *, default: VulnerableShape = VulnerableShape.UNGUARDED
+) -> VulnerableShape | None:
+    """Parse a shape name. Returns ``default`` for ``None``/empty and ``None`` for a bad value."""
+    if raw is None or raw == "":
+        return default
+    try:
+        return VulnerableShape(raw.strip().lower())
+    except ValueError:
+        return None
+
+
 def parse_counter_guard(raw: str | None, *, default: CounterGuard) -> CounterGuard | None:
     """Parse a guard name. Returns ``default`` for ``None``/empty and ``None`` for a bad value."""
     if raw is None or raw == "":

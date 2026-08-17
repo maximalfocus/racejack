@@ -33,9 +33,8 @@ from .db import Conn
 CREATE_INSTRUMENTATION_SCHEMA: Final = """
 CREATE TABLE IF NOT EXISTS toctou_instrumentation_gate (
     gate_id  TEXT PRIMARY KEY,
-    expected INTEGER NOT NULL,
-    arm_at   BIGINT,
-    released BOOLEAN NOT NULL DEFAULT false,
+    expected  INTEGER NOT NULL,
+    arm_at    BIGINT,
     timed_out BOOLEAN NOT NULL DEFAULT false
 );
 
@@ -92,8 +91,9 @@ class TimelineEntry:
 class GateSettings:
     """How wide to hold the window open, and when.
 
-    ``expected`` is how many requests can be inside the window at once for the shape being
-    demonstrated: for an unguarded shape that is the whole burst, because nothing serializes them.
+    ``expected`` is how many requests are let inside the window **at a time**. For an unguarded
+    shape with no throttle that is the whole burst, because nothing serializes them; narrowing it
+    is exactly what throttling does to a race.
     ``arm_at`` optionally restricts the hold to requests whose check observed a particular value,
     which is how a shape that *does* serialize its own writers is caught at the one moment that
     matters — the last unit.
@@ -133,53 +133,65 @@ class Instrumentation:
         )
 
     async def hold_window_open(self, *, request_id: str, observed: int) -> None:
-        """Block until every request that can be inside the window is inside it.
+        """Block until this request's whole batch is inside the window.
 
-        Returns immediately when the gate is not configured, when this request's check did not
-        observe the armed value, or once the gate has already released.
+        Requests pass through **``expected`` at a time**, not once-and-then-free. That batching is
+        what makes a narrowed window mean something: with the width set to the whole burst, every
+        request is inside the window together; with it set to eight, they go through eight at a
+        time, and the damage falls accordingly. A gate that released once and then let everyone
+        through would be measuring nothing but luck.
+
+        Returns immediately when the gate is not configured, or when this request's check did not
+        observe the armed value.
         """
         if not self._enabled:
             return
         cursor = await self._conn.execute(
-            "SELECT expected, arm_at, released FROM toctou_instrumentation_gate WHERE gate_id = %s",
+            "SELECT expected, arm_at FROM toctou_instrumentation_gate WHERE gate_id = %s",
             (GATE_ID,),
         )
         gate = await cursor.fetchone()
-        if gate is None or bool(gate["released"]):
+        if gate is None:
             return
         arm_at = gate["arm_at"]
         if arm_at is not None and observed != int(arm_at):
             return
         expected = int(gate["expected"])
 
-        await self._conn.execute(
+        inserted = await self._conn.execute(
             "INSERT INTO toctou_instrumentation_arrivals (gate_id, request_id, replica)"
-            " VALUES (%s, %s, %s)",
+            " VALUES (%s, %s, %s) RETURNING arrival_id",
             (GATE_ID, request_id, self._replica),
         )
+        arrival = await inserted.fetchone()
+        if arrival is None:
+            return
+        ranked = await self._conn.execute(
+            "SELECT count(*) AS rank FROM toctou_instrumentation_arrivals"
+            " WHERE gate_id = %s AND arrival_id <= %s",
+            (GATE_ID, arrival["arrival_id"]),
+        )
+        rank_row = await ranked.fetchone()
+        rank = int(rank_row["rank"]) if rank_row else 1
+        # Wait for this request's own batch to fill, not for some earlier batch to have filled.
+        target = -(-rank // expected) * expected
+
         loop = asyncio.get_running_loop()
         deadline = loop.time() + WINDOW_TIMEOUT_SECONDS
         while True:
             counted = await self._conn.execute(
-                "SELECT count(*) AS arrived,"
-                " (SELECT released FROM toctou_instrumentation_gate WHERE gate_id = %(gate)s)"
-                " AS released"
-                " FROM toctou_instrumentation_arrivals WHERE gate_id = %(gate)s",
-                {"gate": GATE_ID},
+                "SELECT count(*) AS arrived FROM toctou_instrumentation_arrivals"
+                " WHERE gate_id = %s",
+                (GATE_ID,),
             )
             row = await counted.fetchone()
-            if row is not None and (int(row["arrived"]) >= expected or bool(row["released"])):
-                await self._conn.execute(
-                    "UPDATE toctou_instrumentation_gate SET released = true WHERE gate_id = %s",
-                    (GATE_ID,),
-                )
+            if row is not None and int(row["arrived"]) >= target:
                 return
             if loop.time() >= deadline:
                 # A safety valve, never a normal path: a run that reaches it is not deterministic,
                 # so it is recorded and the harness fails the round rather than quietly continuing.
                 await self._conn.execute(
-                    "UPDATE toctou_instrumentation_gate"
-                    " SET released = true, timed_out = true WHERE gate_id = %s",
+                    "UPDATE toctou_instrumentation_gate SET timed_out = true WHERE gate_id = %s",
                     (GATE_ID,),
                 )
                 return
@@ -200,10 +212,10 @@ async def arm_gate(conn: Conn, settings: GateSettings) -> None:
         await conn.execute("DELETE FROM toctou_instrumentation_arrivals")
         await conn.execute("DELETE FROM toctou_timeline")
         await conn.execute(
-            "INSERT INTO toctou_instrumentation_gate (gate_id, expected, arm_at, released,"
-            " timed_out) VALUES (%s, %s, %s, false, false)"
+            "INSERT INTO toctou_instrumentation_gate (gate_id, expected, arm_at, timed_out)"
+            " VALUES (%s, %s, %s, false)"
             " ON CONFLICT (gate_id) DO UPDATE SET expected = EXCLUDED.expected,"
-            " arm_at = EXCLUDED.arm_at, released = false, timed_out = false",
+            " arm_at = EXCLUDED.arm_at, timed_out = false",
             (GATE_ID, settings.expected, settings.arm_at),
         )
 

@@ -128,12 +128,16 @@ def _round_block(result: RoundResult, *, with_records: bool) -> list[str]:
     lines = [
         THIN,
         f" {result.scenario.label}",
-        f" round {result.index}/{result.total}",
-        THIN,
+        f" round {result.index}/{result.total}   expectation: {result.scenario.expectation.value}",
     ]
+    if result.scenario.note:
+        lines.append(f" note: {result.scenario.note}")
+    lines.append(THIN)
     lines += [f"  {line}" for line in result.reconciliation.as_lines()]
     served = ", ".join(f"{label}={count}" for label, count in result.served_by.items())
     lines.append(f"  served by            {served}")
+    if result.isolation_levels:
+        lines.append(f"  isolation in effect  {', '.join(result.isolation_levels)}")
     lines.append(f"  canonical state      {result.canonical_state}")
     lines += _timeline_block(result)
     if with_records:
@@ -173,19 +177,41 @@ def _secure_verdict(report: HarnessReport) -> list[str]:
 
 
 def _deterministic_verdict(report: HarnessReport) -> list[str]:
-    if report.passed:
+    if not report.passed:
         return [
-            " VERDICT: INVARIANT VIOLATED in every round — the defect reproduced,",
-            " deterministically.",
-            "",
-            " Requests read the same value before any of them wrote, and every one then acted on",
-            " a fact that was already stale. The store confirmed more orders than it owned units",
-            " and reported a negative remaining count; one single-use code was credited many times",
-            " over. Nothing here is exotic: this is what check-then-act does under load.",
+            " VERDICT: FAILED — the deterministic mode did not reproduce what it is required to",
+            " reproduce, so this run proves nothing about the defect.",
         ]
     return [
-        " VERDICT: FAILED — the deterministic mode did not reproduce what it is required to",
-        " reproduce, so this run proves nothing about the defect.",
+        " VERDICT: the defect reproduced, deterministically, in every round that required it.",
+        "",
+        " Requests read the same value before any of them wrote, and every one then acted on a",
+        " fact that was already stale. The store confirmed more orders than it owned units and",
+        " reported a negative remaining count; one single-use code was credited many times over.",
+        " Nothing here is exotic: this is what check-then-act does under load.",
+        "",
+        " Neither half-fix fixed it:",
+        "",
+        "   * the PROCESS-SCOPED LOCK held the invariant perfectly behind one replica and broke",
+        "     at two, with the number of processes sharing the state as the only variable that",
+        "     changed. A lock protects an invariant only if its scope contains every writer of",
+        "     that invariant — and this invariant lives in the database, not in one process.",
+        "",
+        "   * the SINGLE TRANSACTION at the reported default isolation level lost updates exactly",
+        "     as before. A transaction buys atomicity and durability; the lost update it would",
+        "     have to prevent is an ISOLATION property. SERIALIZABLE with retry-on-conflict is a",
+        "     correct transactional answer, and this variant deliberately does not use it.",
+        "",
+        " And the two controls mark the boundaries:",
+        "",
+        "   * run SEQUENTIALLY, the identical vulnerable code is exactly correct — every",
+        "     assertion satisfied, the ledger reconciling perfectly. That is why this defect ships",
+        "     past code review and a green test suite.",
+        "",
+        "   * THROTTLED, the overrun falls as fewer requests fit inside the window, and never",
+        "     reaches zero. A rate limit, an added delay, a queue, or a slower client reduces the",
+        "     probability of a race and never its possibility. A defect that appears only under",
+        "     load is still a defect at any load.",
     ]
 
 

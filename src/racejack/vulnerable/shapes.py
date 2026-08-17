@@ -21,12 +21,17 @@ perfectly correct ledger.
 
 from __future__ import annotations
 
+import asyncio
+from collections.abc import Awaitable, Callable
 from typing import Final
 from uuid import uuid4
 
+from ..config import VulnerableShape
 from ..db import Conn
 from ..instrumentation import EVENT_ACT, EVENT_CHECK, Instrumentation
 from ..models import OrderOutcome, OrderResult, RedemptionOutcome, RedemptionResult
+
+PlaceOrder = Callable[..., Awaitable[OrderResult]]
 
 # --- the counter invariant, unguarded ----------------------------------------------------------
 
@@ -67,7 +72,7 @@ VALUES (%(redemption_id)s, %(code)s, %(wallet_id)s, %(buyer_id)s, %(amount_cents
 """
 
 
-async def place_order_unguarded(
+async def _check_then_act_on_the_counter(
     conn: Conn,
     instrumentation: Instrumentation,
     *,
@@ -75,8 +80,14 @@ async def place_order_unguarded(
     buyer_id: str,
     served_by: str,
     request_id: str,
+    note: str | None = None,
 ) -> OrderResult:
-    """Check whether there is room, then claim a unit. Two steps, and a window between them."""
+    """Check whether there is room, then claim a unit. Two steps, and a window between them.
+
+    Every counter shape in this module runs *this* function. The half-fixes below differ only in
+    what they wrap around it, which is exactly the point: neither of them changes the sequencing,
+    so neither of them closes the window.
+    """
     # ---- TIME OF CHECK ------------------------------------------------------------------------
     cursor = await conn.execute(SQL_CHECK_COUNTER, {"drop_id": drop_id})
     drop = await cursor.fetchone()
@@ -85,7 +96,11 @@ async def place_order_unguarded(
     units_available = int(drop["units_available"])
     units_sold = int(drop["units_sold"])
     await instrumentation.record(
-        request_id=request_id, event=EVENT_CHECK, resource=drop_id, observed=units_sold
+        request_id=request_id,
+        event=EVENT_CHECK,
+        resource=drop_id,
+        observed=units_sold,
+        detail=note,
     )
     if units_sold >= units_available:
         return OrderResult(OrderOutcome.REFUSED)
@@ -117,9 +132,110 @@ async def place_order_unguarded(
         event=EVENT_ACT,
         resource=drop_id,
         observed=now_sold,
-        detail=f"decided on units_sold={units_sold}",
+        detail=f"decided on units_sold={units_sold}" + (f" · {note}" if note else ""),
     )
     return OrderResult(OrderOutcome.CONFIRMED, order_id, now_sold)
+
+
+async def place_order_unguarded(
+    conn: Conn,
+    instrumentation: Instrumentation,
+    *,
+    drop_id: str,
+    buyer_id: str,
+    served_by: str,
+    request_id: str,
+) -> OrderResult:
+    """Shape 1: nothing wrapped around it at all."""
+    return await _check_then_act_on_the_counter(
+        conn,
+        instrumentation,
+        drop_id=drop_id,
+        buyer_id=buyer_id,
+        served_by=served_by,
+        request_id=request_id,
+    )
+
+
+_PROCESS_LOCK: Final = asyncio.Lock()
+"""A lock whose scope is **this process**. That sentence is the entire lesson.
+
+It is a completely ordinary `asyncio.Lock`, used completely correctly, and behind one application
+worker it makes the defect vanish: requests queue up, each one reads a value nobody else can be
+about to change, and the ledger comes out perfect. Start a second replica against the same database
+and the overrun comes straight back, because the second process has a different lock and neither one
+knows about the other.
+
+A lock protects an invariant only if its scope contains **every writer of that invariant**. This one
+contains the writers in one process, and the invariant lives in the database.
+"""
+
+
+async def place_order_process_lock(
+    conn: Conn,
+    instrumentation: Instrumentation,
+    *,
+    drop_id: str,
+    buyer_id: str,
+    served_by: str,
+    request_id: str,
+) -> OrderResult:
+    """Shape 3: the same check-then-act, serialized — within one process."""
+    async with _PROCESS_LOCK:
+        return await _check_then_act_on_the_counter(
+            conn,
+            instrumentation,
+            drop_id=drop_id,
+            buyer_id=buyer_id,
+            served_by=served_by,
+            request_id=request_id,
+            note=f"held the process-scoped lock on {served_by}",
+        )
+
+
+SQL_ISOLATION_LEVEL: Final = "SHOW transaction_isolation"
+
+
+async def place_order_single_transaction(
+    conn: Conn,
+    instrumentation: Instrumentation,
+    *,
+    drop_id: str,
+    buyer_id: str,
+    served_by: str,
+    request_id: str,
+) -> OrderResult:
+    """Shape 4: the same read-check-write, wrapped in one transaction. Still not a fix.
+
+    A transaction buys *atomicity* — all of it happens or none of it does — and durability. The
+    lost update this needs to prevent is neither of those; it is an **isolation** property. At the
+    `READ COMMITTED` default a statement sees whatever was committed when that statement began, so
+    two transactions can each read the same value and each go on to write. `BEGIN` and `COMMIT`
+    around unchanged logic change nothing about that.
+
+    `SERIALIZABLE` with retry-on-conflict *is* a correct transactional answer. This variant
+    deliberately does not use it.
+    """
+    async with conn.transaction():
+        cursor = await conn.execute(SQL_ISOLATION_LEVEL)
+        row = await cursor.fetchone()
+        isolation = str(row["transaction_isolation"]) if row else "unknown"
+        return await _check_then_act_on_the_counter(
+            conn,
+            instrumentation,
+            drop_id=drop_id,
+            buyer_id=buyer_id,
+            served_by=served_by,
+            request_id=request_id,
+            note=f"inside one transaction at isolation={isolation}",
+        )
+
+
+COUNTER_SHAPES: Final[dict[VulnerableShape, PlaceOrder]] = {
+    VulnerableShape.UNGUARDED: place_order_unguarded,
+    VulnerableShape.PROCESS_LOCK: place_order_process_lock,
+    VulnerableShape.SINGLE_TRANSACTION: place_order_single_transaction,
+}
 
 
 async def redeem_unguarded(

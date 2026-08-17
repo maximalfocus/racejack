@@ -16,7 +16,7 @@ import pytest
 
 from racejack.auth import TOKEN_PREFIX
 from racejack.config import CounterGuard, HarnessConfig, RunnerConfig
-from racejack.harness.engine import HarnessReport, RoundResult, Scenario
+from racejack.harness.engine import Expectation, HarnessReport, RoundResult, Scenario
 from racejack.harness.ledger import (
     Invariant,
     Ledger,
@@ -27,9 +27,12 @@ from racejack.harness.ledger import (
 from racejack.harness.transcript import render_summary, render_transcript
 from racejack.httpclient import RequestRecord
 
+# Claims about how fast anything is. Naming a throttle mechanism ("a slower client", "an added
+# delay") is not one of those, so the comparatives are only flagged when they actually compare.
 PERFORMANCE_CLAIM = re.compile(
-    r"\b(throughput|latency|latencies|benchmark\w*|per second|requests/s|rps|qps|"
-    r"faster|slower|speedup|elapsed|duration|p9[059]|percentile)\b",
+    r"\b(throughput|latenc(?:y|ies)|benchmark\w*|per second|requests/s|rps|qps|"
+    r"speedup|outperform\w*|elapsed|duration|p9[059]|percentile|"
+    r"(?:faster|slower|quicker) than)\b",
     re.IGNORECASE,
 )
 
@@ -73,9 +76,10 @@ def _report(
     scenario = Scenario(
         Invariant.COUNTER,
         CounterGuard.CONDITIONAL_WRITE.value,
-        CounterGuard.CONDITIONAL_WRITE.value,
         2,
         60,
+        Expectation.SECURE_HOLDS,
+        guard_header=CounterGuard.CONDITIONAL_WRITE.value,
     )
     result = RoundResult(
         scenario=scenario,
