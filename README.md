@@ -16,9 +16,12 @@ Everything here is invented. There are no real stores, buyers, products, promoti
 balances, or credentials, and nothing in this project contacts any system other than its own
 containers.
 
-> **Status — in progress.** The storefront, both correct implementations, the concurrent load
-> harness, the full four-shape vulnerable ladder, both negative controls, and the regression matrix
-> are here. Still to come: the comparison CLI and the educational walkthrough.
+> **Status — feature complete.** The storefront, both correct implementations, the concurrent load
+> harness, the full four-shape vulnerable ladder, both negative controls, the regression matrix, the
+> comparison CLI, and the walkthrough are all here.
+
+**New here?** [`WALKTHROUGH.md`](WALKTHROUGH.md) is the long version: the mechanism, the CWE/OWASP
+terminology with its caveat, all four shapes, both controls, both fixes, and what to take away.
 
 ## Run it
 
@@ -41,8 +44,15 @@ docker compose up --detach --wait app-a app-b
 docker compose run --rm harness
 ```
 
-The full gate — the sequential demonstration, the audit-event check, the harness, Ruff, mypy, and
-the test suite, all through the same Compose boundary that CI uses:
+Every scenario side by side in one table — both secure strategies, all four vulnerable shapes, both
+reproduction modes, both replica counts, and both controls:
+
+```sh
+docker compose run --rm compare              # add --verbose for per-request records and timelines
+```
+
+The full gate — the sequential demonstration, the audit-event check, the harness, the comparison,
+Ruff, mypy, and the test suite, all through the same Compose boundary that CI uses:
 
 ```sh
 bash scripts/verify.sh
@@ -353,6 +363,28 @@ count. That is exactly what a backstop is for, and it is why a real system wants
 showing the application-level damage means taking it off first and being loud about it. The secure
 schema is untouched, and `python -m racejack.seed --secure` puts everything back.
 
+## The comparison
+
+`docker compose run --rm compare` runs every scenario once and prints them side by side. Read it by
+finding two rows that differ in exactly one column:
+
+```
+  variant     guard / shape       mode           rep  concurrency       issued  ok  rejected  ledger                   overrun  verdict
+  secure      conditional_write   natural          2  60                    60  12        48  sold 12 of 12                  0  SECURE
+  vulnerable  unguarded           deterministic    2  60                    60  60         0  sold 60 of 12                 48  VULNERABLE
+  vulnerable  process_lock        deterministic    1  60                    60  12        59  sold 12 of 12                  0  INCONCLUSIVE
+  vulnerable  process_lock        deterministic    2  60                    60  13        58  sold 13 of 12                  1  VULNERABLE
+  vulnerable  single_transaction  deterministic    2  60                    60  60         0  sold 60 of 12                 48  VULNERABLE
+  vulnerable  unguarded           deterministic    2  1 (sequential)        60  12        48  sold 12 of 12                  0  INCONCLUSIVE
+  vulnerable  unguarded           deterministic    2  40 in waves of 8      40   8        32  credited 20000 of 2500         7  VULNERABLE
+```
+
+`--verbose` adds the underlying per-request records and the interleaving timelines. If the vulnerable
+profile is not running, the comparison says so and compares what it can rather than presenting a
+secure-only table as the whole picture.
+
+`INCONCLUSIVE` means vulnerable code that happened not to lose a race this time. It is not a pass.
+
 ## Layout
 
 ```
@@ -372,9 +404,12 @@ src/racejack/
   vulnerable/    the opt-in vulnerable application: shapes.py holds all four shapes
   demo/          the sequential demonstration runner
   harness/       the concurrent load harness: burst, ledger, engine, transcript
+  compare/       the comparison: every scenario reduced to one comparable row
 tests/           the regression suite, run inside the same network
-artifacts/       harness transcripts from the last run (disposable, gitignored)
+artifacts/       transcripts and comparisons from the last run (disposable, gitignored)
 ```
+
+See [`WALKTHROUGH.md`](WALKTHROUGH.md) for the full explanation of everything above.
 
 ## Safety
 

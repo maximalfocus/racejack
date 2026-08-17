@@ -75,6 +75,9 @@ step "vulnerable · natural mode — no instrumentation at all; reports only wha
 docker compose run --rm --no-deps -T harness \
   python -m racejack.harness --variant vulnerable --mode natural
 
+step "comparison across every scenario"
+docker compose run --rm --no-deps -T compare
+
 step "restoring the secure baseline before the suite runs"
 docker compose run --rm --no-deps -T harness python -m racejack.seed --secure
 

@@ -192,6 +192,16 @@ services:
       - ./artifacts:/artifacts
     command: ["python", "-m", "racejack.harness"]
 
+  # The comparison: every scenario side by side, in one table.
+  compare:
+    <<: [*hardening, *runner]
+    environment:
+      <<: *runner-env
+      RACEJACK_TRANSCRIPT_PATH: /artifacts/harness-transcript.txt
+    volumes:
+      - ./artifacts:/artifacts
+    command: ["python", "-m", "racejack.compare", "--output", "/artifacts/comparison.txt"]
+
   # Ruff, mypy, and the test suite, through the same boundary as everything else.
   verify:
     <<: [*hardening, *runner]

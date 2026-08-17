@@ -44,7 +44,7 @@ BACKSTOP_NOTE: Final = (
 )
 
 
-def _outcome(record: RequestRecord) -> str:
+def outcome_of(record: RequestRecord) -> str:
     if record.refused:
         return "refused"
     if record.succeeded:
@@ -96,7 +96,7 @@ def _header(report: HarnessReport, config: HarnessConfig) -> list[str]:
     return lines
 
 
-def _timeline_block(result: RoundResult) -> list[str]:
+def timeline_block(result: RoundResult) -> list[str]:
     """The reads that observed the same value, and the writes that followed. That pair *is* it."""
     if not result.racing_groups:
         return []
@@ -139,7 +139,7 @@ def _round_block(result: RoundResult, *, with_records: bool) -> list[str]:
     if result.isolation_levels:
         lines.append(f"  isolation in effect  {', '.join(result.isolation_levels)}")
     lines.append(f"  canonical state      {result.canonical_state}")
-    lines += _timeline_block(result)
+    lines += timeline_block(result)
     if with_records:
         lines.append("")
         # The request id is the same one the application stamps on its audit event, so a refusal
@@ -151,7 +151,7 @@ def _round_block(result: RoundResult, *, with_records: bool) -> list[str]:
             lines.append(
                 f"  {record.sequence:>5}  {record.request_id:<13}  {record.operation:<9}  "
                 f"{record.buyer_id:<11}  {record.addressed:<9}  {record.served_by or '-':<9}  "
-                f"{record.status_code:>6}  {_outcome(record)}"
+                f"{record.status_code:>6}  {outcome_of(record)}"
             )
     lines.append("")
     return lines
