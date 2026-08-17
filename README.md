@@ -51,6 +51,11 @@ reproduction modes, both replica counts, and both controls:
 docker compose run --rm compare              # add --verbose for per-request records and timelines
 ```
 
+Both of those also write their output to `artifacts/`. The containers run as a non-root user, so if
+you want the files on your host, create the directory first — `install -d -m 0777 artifacts` — or
+just run `scripts/verify.sh`, which does it for you. Skipping it costs you the file and nothing
+else: the run still completes, still prints everything, and still exits on its own verdict.
+
 The full gate — the sequential demonstration, the audit-event check, the harness, the comparison,
 Ruff, mypy, and the test suite, all through the same Compose boundary that CI uses:
 
