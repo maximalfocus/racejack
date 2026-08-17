@@ -40,7 +40,7 @@ ENV RUFF_CACHE_DIR=/tmp/ruff-cache \
 RUN --mount=type=cache,target=/root/.cache/uv uv sync --frozen --no-install-project
 COPY src ./src
 COPY tests ./tests
-COPY docker-compose.yml ./
+COPY docker-compose.yml WALKTHROUGH.md ./
 RUN --mount=type=cache,target=/root/.cache/uv uv sync --frozen --no-editable
 USER 10001:10001
 CMD ["pytest", "-p", "no:cacheprovider"]

@@ -73,13 +73,16 @@ def test_every_service_runs_non_root(compose: dict[str, Any]) -> None:
 def test_the_only_host_path_the_demo_touches_is_its_own_artifacts_directory(
     compose: dict[str, Any],
 ) -> None:
-    """A bind mount is a hole in the containment boundary; there is exactly one, and it is ours."""
+    """A bind mount is a hole in the containment boundary; the only one is our own scratch dir."""
     mounts = {
         name: service["volumes"]
         for name, service in compose["services"].items()
         if service.get("volumes")
     }
-    assert mounts == {"harness": ["./artifacts:/artifacts"]}, f"unexpected host mounts: {mounts}"
+    assert mounts == {
+        "harness": ["./artifacts:/artifacts"],
+        "compare": ["./artifacts:/artifacts"],
+    }, f"unexpected host mounts: {mounts}"
 
 
 def test_the_database_holds_no_persistent_state(compose: dict[str, Any]) -> None:
