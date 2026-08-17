@@ -9,6 +9,7 @@ measures correctness only.
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -38,6 +39,7 @@ def _config() -> HarnessConfig:
         runner=RunnerConfig(
             database_url="postgresql://racejack:demo@db:5432/racejack",
             replica_urls=("http://app-a:8000", "http://app-b:8000"),
+            vulnerable_replica_urls=("http://vuln-a:8000", "http://vuln-b:8000"),
             request_timeout_seconds=30.0,
         ),
         order_concurrency=60,
@@ -64,14 +66,22 @@ def _ledger() -> Ledger:
     )
 
 
-def _report(variant: Variant = Variant.SECURE) -> HarnessReport:
+def _report(
+    variant: Variant = Variant.SECURE, mode: ReproductionMode = ReproductionMode.NATURAL
+) -> HarnessReport:
     ledger = _ledger()
-    scenario = Scenario(Invariant.COUNTER, CounterGuard.CONDITIONAL_WRITE, 2, 60)
+    scenario = Scenario(
+        Invariant.COUNTER,
+        CounterGuard.CONDITIONAL_WRITE.value,
+        CounterGuard.CONDITIONAL_WRITE.value,
+        2,
+        60,
+    )
     result = RoundResult(
         scenario=scenario,
         index=1,
         total=1,
-        reconciliation=Reconciliation(ledger, Invariant.COUNTER, variant, ReproductionMode.NATURAL),
+        reconciliation=Reconciliation(ledger, Invariant.COUNTER, variant, mode),
         served_by={"app-a": 30, "app-b": 30},
         canonical_state=ledger.canonical_state(),
         records=(
@@ -99,7 +109,7 @@ def _report(variant: Variant = Variant.SECURE) -> HarnessReport:
     )
     report = HarnessReport(
         variant=variant,
-        mode=ReproductionMode.NATURAL,
+        mode=mode,
         replica_labels=("app-a", "app-b"),
         rounds_per_scenario=1,
         references={Invariant.COUNTER.value: ledger.canonical_state()},
@@ -109,16 +119,32 @@ def _report(variant: Variant = Variant.SECURE) -> HarnessReport:
     return report
 
 
-@pytest.mark.parametrize("render", [render_summary, render_transcript])
-def test_no_output_makes_a_performance_claim(render: object) -> None:
-    text = render(_report(), _config())  # type: ignore[operator]
+EVERY_RENDERING = [
+    pytest.param(render, variant, mode, id=f"{render.__name__}-{variant.value}-{mode.value}")
+    for render in (render_summary, render_transcript)
+    for variant in Variant
+    for mode in ReproductionMode
+]
+
+
+@pytest.mark.parametrize(("render", "variant", "mode"), EVERY_RENDERING)
+def test_no_output_makes_a_performance_claim(
+    render: Callable[[HarnessReport, HarnessConfig], str],
+    variant: Variant,
+    mode: ReproductionMode,
+) -> None:
+    text = render(_report(variant=variant, mode=mode), _config())
     found = PERFORMANCE_CLAIM.findall(text)
     assert found == [], f"the harness must make no performance claim; found {found}"
 
 
-@pytest.mark.parametrize("render", [render_summary, render_transcript])
-def test_no_output_carries_a_token(render: object) -> None:
-    assert TOKEN_PREFIX not in render(_report(), _config())  # type: ignore[operator]
+@pytest.mark.parametrize(("render", "variant", "mode"), EVERY_RENDERING)
+def test_no_output_carries_a_token(
+    render: Callable[[HarnessReport, HarnessConfig], str],
+    variant: Variant,
+    mode: ReproductionMode,
+) -> None:
+    assert TOKEN_PREFIX not in render(_report(variant=variant, mode=mode), _config())
 
 
 def test_the_reconciliation_carries_every_number_it_must() -> None:
@@ -143,10 +169,24 @@ def test_the_transcript_carries_the_per_request_records_and_the_summary_does_not
     assert "order-00001" not in summary
 
 
-def test_the_transcript_names_the_reproduction_mode_and_denies_instrumentation() -> None:
+def test_a_natural_transcript_says_nothing_is_attached() -> None:
     text = render_transcript(_report(), _config())
-    assert "natural" in text
-    assert "no instrumentation in any code path" in text
+    assert "reproduction mode    : natural" in text
+    assert "No instrumentation is attached in this mode" in text
+    assert "INSTRUMENTED RUN" not in text
+
+
+def test_a_deterministic_transcript_says_the_window_is_genuine_and_the_backstop_is_off() -> None:
+    """The two things a reader must not be able to miss on an instrumented vulnerable run."""
+    text = render_transcript(
+        _report(variant=Variant.VULNERABLE, mode=ReproductionMode.DETERMINISTIC), _config()
+    )
+    assert "INTENTIONALLY VULNERABLE APPLICATION" in text
+    assert "INSTRUMENTED RUN" in text
+    assert "genuine property of this code" in text
+    assert "only the microscope" in text
+    assert "backstop has been removed for this run" in text
+    assert "drops_units_sold_within_availability" in text
 
 
 def test_a_quiet_vulnerable_run_is_never_rendered_as_a_pass() -> None:

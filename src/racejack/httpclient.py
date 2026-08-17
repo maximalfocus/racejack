@@ -23,6 +23,8 @@ from .auth import token_for
 REQUEST_ID_HEADER: Final = "X-Request-Id"
 REPLICA_HEADER: Final = "X-Racejack-Replica"
 GUARD_HEADER: Final = "X-Racejack-Guard"
+INSTRUMENTED_WINDOW_HEADER: Final = "X-Racejack-Instrumented-Window"
+INSTRUMENTED_WINDOW_HOLD: Final = "hold"
 
 
 @dataclass(frozen=True, slots=True)
@@ -135,8 +137,26 @@ class StorefrontHTTP:
             body=body if isinstance(body, dict) else None,
         )
 
+    @staticmethod
+    def _demonstration_headers(
+        *, guard: str | None = None, instrumented: bool = False
+    ) -> dict[str, str] | None:
+        headers: dict[str, str] = {}
+        if guard:
+            headers[GUARD_HEADER] = guard
+        if instrumented:
+            # Deterministic reproduction mode. Absent — the default — nothing runs at all.
+            headers[INSTRUMENTED_WINDOW_HEADER] = INSTRUMENTED_WINDOW_HOLD
+        return headers or None
+
     async def place_order(
-        self, drop_id: str, *, sequence: int, buyer_index: int, guard: str | None = None
+        self,
+        drop_id: str,
+        *,
+        sequence: int,
+        buyer_index: int,
+        guard: str | None = None,
+        instrumented: bool = False,
     ) -> RequestRecord:
         return await self.send(
             "POST",
@@ -144,11 +164,17 @@ class StorefrontHTTP:
             operation="order",
             sequence=sequence,
             buyer_index=buyer_index,
-            extra_headers={GUARD_HEADER: guard} if guard else None,
+            extra_headers=self._demonstration_headers(guard=guard, instrumented=instrumented),
         )
 
     async def redeem(
-        self, *, sequence: int, code: str, wallet_id: str, buyer_index: int
+        self,
+        *,
+        sequence: int,
+        code: str,
+        wallet_id: str,
+        buyer_index: int,
+        instrumented: bool = False,
     ) -> RequestRecord:
         return await self.send(
             "POST",
@@ -157,6 +183,7 @@ class StorefrontHTTP:
             sequence=sequence,
             buyer_index=buyer_index,
             json_body={"code": code, "wallet_id": wallet_id},
+            extra_headers=self._demonstration_headers(instrumented=instrumented),
         )
 
     async def read_drop(

@@ -22,6 +22,22 @@ async def _amain(argv: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument(
+        "--variant",
+        choices=[variant.value for variant in Variant],
+        default=Variant.SECURE.value,
+        help="which application to drive (default: secure)",
+    )
+    parser.add_argument(
+        "--mode",
+        choices=[mode.value for mode in ReproductionMode],
+        default=ReproductionMode.DETERMINISTIC.value,
+        help=(
+            "deterministic holds the time-of-check to time-of-use window open with an instrumented "
+            "synchronization point, so the interleaving is identical everywhere; natural attaches "
+            "nothing at all. The secure application is never instrumented either way."
+        ),
+    )
+    parser.add_argument(
         "--transcript",
         type=Path,
         default=None,
@@ -32,13 +48,20 @@ async def _amain(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
+    variant = Variant(args.variant)
+    mode = ReproductionMode(args.mode)
+    if variant is Variant.SECURE and mode is ReproductionMode.DETERMINISTIC:
+        # There is no instrumented synchronization point in any secure code path, so there is
+        # nothing for a deterministic run to hold open.
+        mode = ReproductionMode.NATURAL
+
     config = HarnessConfig.from_env()
-    report = await Harness(config, variant=Variant.SECURE, mode=ReproductionMode.NATURAL).run()
+    report = await Harness(config, variant=variant, mode=mode).run()
 
     print(render_summary(report, config))
 
     if not args.no_transcript:
-        path = args.transcript or config.transcript_path
+        path = args.transcript or _transcript_path(config, variant, mode)
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(render_transcript(report, config))
@@ -48,6 +71,12 @@ async def _amain(argv: list[str] | None = None) -> int:
         print(f"transcript written to {path}")
 
     return 0 if report.passed else 1
+
+
+def _transcript_path(config: HarnessConfig, variant: Variant, mode: ReproductionMode) -> Path:
+    """One transcript per variant and mode, so a run never overwrites another run's evidence."""
+    base = config.transcript_path
+    return base.with_name(f"{base.stem}-{variant.value}-{mode.value}{base.suffix}")
 
 
 def main(argv: list[str] | None = None) -> int:

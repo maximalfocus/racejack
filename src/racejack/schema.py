@@ -77,3 +77,33 @@ BACKSTOP_CONSTRAINTS: Final = (
     "drops_units_sold_within_availability",
     "redemptions_single_use",
 )
+
+DROP_BACKSTOP_CONSTRAINTS: Final = """
+ALTER TABLE drops DROP CONSTRAINT IF EXISTS drops_units_sold_within_availability;
+ALTER TABLE redemptions DROP CONSTRAINT IF EXISTS redemptions_single_use;
+"""
+"""Remove the backstop — only ever for a vulnerable demonstration, and never silently.
+
+With the backstop in place an unguarded write does not oversell the drop; it fails as a constraint
+violation, and the store returns an error instead of a negative remaining count. That is exactly
+what a backstop is for, and it is why a real system wants one. It is also why a demonstration of the
+*application-level* damage has to take it off first, say so out loud, and put it back afterwards.
+"""
+
+RESTORE_BACKSTOP_CONSTRAINTS: Final = """
+DO $$ BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint WHERE conname = 'drops_units_sold_within_availability'
+    ) THEN
+        ALTER TABLE drops ADD CONSTRAINT drops_units_sold_within_availability
+            CHECK (units_sold >= 0 AND units_sold <= units_available);
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'redemptions_single_use') THEN
+        ALTER TABLE redemptions ADD CONSTRAINT redemptions_single_use UNIQUE (code);
+    END IF;
+END $$;
+"""
+
+PRESENT_BACKSTOP_CONSTRAINTS: Final = """
+SELECT conname FROM pg_constraint WHERE conname = ANY(%s)
+"""

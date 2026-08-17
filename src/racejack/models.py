@@ -69,7 +69,10 @@ class WalletView(BaseModel):
 class HealthResponse(BaseModel):
     status: str
     replica: str
-    counter_guard: str
+    variant: str
+    """``secure`` or ``vulnerable`` — so no run can be confused about what it was driving."""
+
+    strategy: str
 
 
 class OrderOutcome(StrEnum):
