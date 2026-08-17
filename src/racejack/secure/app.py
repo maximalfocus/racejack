@@ -1,55 +1,35 @@
 """The secure application.
 
-Both replicas run this module. Every response is deliberately uninformative about *why* it was
-refused: "sold out" and "lost the race to another buyer" are the same 409 with the same body, and a
-missing, malformed, unknown, or expired credential is the same 401 with the same body.
+Both `app-a` and `app-b` run this module. Its whole content is the two write routes, because
+everything else — credentials, read views, refusal responses, success payloads — is shared with the
+vulnerable variant in `racejack.api`. What is left here is the part that matters: which guard runs.
 """
 
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import Annotated, Any, Final
-from uuid import uuid4
+from typing import Annotated
 
 import psycopg
 from fastapi import FastAPI, Header, HTTPException, Request, Response, status
 
-from .. import audit
-from ..auth import authenticate
-from ..config import AppConfig, CounterGuard, parse_counter_guard
-from ..db import ConnPool, make_pool
-from ..models import (
-    DropView,
-    HealthResponse,
-    OrderOutcome,
-    OrderResponse,
-    OrderStatus,
-    RedemptionOutcome,
-    RedemptionRequest,
-    RedemptionResponse,
-    RedemptionStatus,
-    WalletView,
+from ..api import (
+    GUARD_HEADER,
+    add_common_routes,
+    bad_request,
+    finish_order,
+    finish_redemption,
+    pool_of,
+    require_buyer,
+    stamp_requests,
 )
-from ..store import read_drop, read_wallet
+from ..config import AppConfig, CounterGuard, parse_counter_guard
+from ..db import make_pool
+from ..models import OrderResponse, RedemptionRequest, RedemptionResponse
 from .guards import COUNTER_STRATEGIES, redeem_credit_code
 
-REQUEST_ID_HEADER: Final = "X-Request-Id"
-REPLICA_HEADER: Final = "X-Racejack-Replica"
-GUARD_HEADER: Final = "X-Racejack-Guard"
-
-DETAIL_UNAUTHORIZED: Final = "unauthorized"
-DETAIL_NOT_FOUND: Final = "not found"
-DETAIL_REFUSED: Final = "request could not be completed"
-DETAIL_BAD_REQUEST: Final = "bad request"
-
-
-def _unauthorized() -> HTTPException:
-    return HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED,
-        detail=DETAIL_UNAUTHORIZED,
-        headers={"WWW-Authenticate": "Bearer"},
-    )
+VARIANT = "secure"
 
 
 def create_app(config: AppConfig | None = None) -> FastAPI:
@@ -79,41 +59,14 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         lifespan=lifespan,
     )
     app.state.config = settings
-
-    def pool_of(request: Request) -> ConnPool:
-        pool: ConnPool = request.app.state.pool
-        return pool
-
-    @app.middleware("http")
-    async def stamp_request(request: Request, call_next: Any) -> Response:
-        request_id = request.headers.get(REQUEST_ID_HEADER) or str(uuid4())
-        request.state.request_id = request_id
-        response: Response = await call_next(request)
-        response.headers[REQUEST_ID_HEADER] = request_id
-        response.headers[REPLICA_HEADER] = settings.replica_name
-        return response
-
-    def require_buyer(authorization: str | None) -> str:
-        buyer_id = authenticate(authorization)
-        if buyer_id is None:
-            raise _unauthorized()
-        return buyer_id
+    stamp_requests(app, settings.replica_name)
+    add_common_routes(app, settings, variant=VARIANT, strategy=settings.default_counter_guard.value)
 
     def selected_guard(raw: str | None) -> CounterGuard:
         guard = parse_counter_guard(raw, default=settings.default_counter_guard)
         if guard is None:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=DETAIL_BAD_REQUEST)
+            raise bad_request()
         return guard
-
-    @app.get("/healthz", response_model=HealthResponse)
-    async def healthz(request: Request) -> HealthResponse:
-        async with pool_of(request).connection() as conn:
-            await conn.execute("SELECT 1")
-        return HealthResponse(
-            status="ok",
-            replica=settings.replica_name,
-            counter_guard=settings.default_counter_guard.value,
-        )
 
     @app.post(
         "/drops/{drop_id}/orders",
@@ -132,30 +85,14 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         response.headers[GUARD_HEADER] = guard.value
         async with pool_of(request).connection() as conn:
             result = await COUNTER_STRATEGIES[guard](
-                conn,
-                drop_id=drop_id,
-                buyer_id=buyer_id,
-                served_by=settings.replica_name,
+                conn, drop_id=drop_id, buyer_id=buyer_id, served_by=settings.replica_name
             )
-        if result.outcome is OrderOutcome.UNKNOWN_DROP:
-            raise HTTPException(status.HTTP_404_NOT_FOUND, detail=DETAIL_NOT_FOUND)
-        if result.outcome is OrderOutcome.REFUSED:
-            audit.emit_refusal(
-                request_id=request.state.request_id,
-                replica=settings.replica_name,
-                operation=audit.RefusedOperation.PLACE_ORDER,
-                resource_type="drop",
-                resource_id=drop_id,
-            )
-            raise HTTPException(status.HTTP_409_CONFLICT, detail=DETAIL_REFUSED)
-        # Narrowed by the CONFIRMED outcome; the guards never return one without the other.
-        assert result.order_id is not None
-        return OrderResponse(
-            order_id=result.order_id,
+        return finish_order(
+            result,
             drop_id=drop_id,
             buyer_id=buyer_id,
-            units=1,
-            status=OrderStatus.CONFIRMED,
+            request_id=request.state.request_id,
+            replica=settings.replica_name,
         )
 
     @app.post(
@@ -177,56 +114,14 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
                 buyer_id=buyer_id,
                 served_by=settings.replica_name,
             )
-        if result.outcome is RedemptionOutcome.UNKNOWN_TARGET:
-            raise HTTPException(status.HTTP_404_NOT_FOUND, detail=DETAIL_NOT_FOUND)
-        if result.outcome is RedemptionOutcome.REFUSED:
-            audit.emit_refusal(
-                request_id=request.state.request_id,
-                replica=settings.replica_name,
-                operation=audit.RefusedOperation.REDEEM_CREDIT_CODE,
-                resource_type="credit_code",
-                resource_id=payload.code,
-            )
-            raise HTTPException(status.HTTP_409_CONFLICT, detail=DETAIL_REFUSED)
-        # Narrowed by the CREDITED outcome.
-        assert result.redemption_id is not None
-        assert result.amount_cents is not None
-        assert result.wallet_balance_cents is not None
-        return RedemptionResponse(
-            redemption_id=result.redemption_id,
+        return finish_redemption(
+            result,
             code=payload.code,
             wallet_id=payload.wallet_id,
             buyer_id=buyer_id,
-            amount_cents=result.amount_cents,
-            wallet_balance_cents=result.wallet_balance_cents,
-            status=RedemptionStatus.CREDITED,
+            request_id=request.state.request_id,
+            replica=settings.replica_name,
         )
-
-    @app.get("/drops/{drop_id}", response_model=DropView)
-    async def get_drop(
-        drop_id: str,
-        request: Request,
-        authorization: Annotated[str | None, Header()] = None,
-    ) -> DropView:
-        require_buyer(authorization)
-        async with pool_of(request).connection() as conn:
-            view = await read_drop(conn, drop_id)
-        if view is None:
-            raise HTTPException(status.HTTP_404_NOT_FOUND, detail=DETAIL_NOT_FOUND)
-        return view
-
-    @app.get("/credit/wallets/{wallet_id}", response_model=WalletView)
-    async def get_wallet(
-        wallet_id: str,
-        request: Request,
-        authorization: Annotated[str | None, Header()] = None,
-    ) -> WalletView:
-        require_buyer(authorization)
-        async with pool_of(request).connection() as conn:
-            view = await read_wallet(conn, wallet_id)
-        if view is None:
-            raise HTTPException(status.HTTP_404_NOT_FOUND, detail=DETAIL_NOT_FOUND)
-        return view
 
     @app.exception_handler(psycopg.OperationalError)
     async def on_database_unavailable(request: Request, exc: Exception) -> Response:

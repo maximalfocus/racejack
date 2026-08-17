@@ -25,6 +25,7 @@ x-store-env: &store-env
 x-runner-env: &runner-env
   RACEJACK_DATABASE_URL: postgresql://racejack:racejack-demo-password@db:5432/racejack
   RACEJACK_REPLICA_URLS: "http://app-a:8000,http://app-b:8000"
+  RACEJACK_VULNERABLE_REPLICA_URLS: "http://vuln-a:8000,http://vuln-b:8000"
   # A documented run parameter: how many of the running replicas the runner addresses (1 or 2).
   RACEJACK_REPLICAS: "${RACEJACK_REPLICAS:-2}"
 
@@ -36,6 +37,37 @@ x-app: &app
   user: "10001:10001"
   networks: [demo]
   tmpfs: ["/tmp:rw,noexec,nosuid,size=16m"]
+  healthcheck:
+    test: ["CMD", "python", "-m", "racejack.healthcheck"]
+    interval: 3s
+    timeout: 5s
+    retries: 30
+    start_period: 3s
+  depends_on:
+    db:
+      condition: service_healthy
+    seed:
+      condition: service_completed_successfully
+
+x-vulnerable-env: &vulnerable-env
+  RACEJACK_DATABASE_URL: postgresql://racejack:racejack-demo-password@db:5432/racejack
+  # Pools large enough that every concurrent request can hold its own request connection *and* the
+  # separate instrumentation connection the deterministic rendezvous needs.
+  RACEJACK_POOL_MAX_SIZE: "70"
+  # Required. The opt-in profile alone is not an acknowledgement; the application refuses to start.
+  ALLOW_VULNERABLE_DEMO: "${ALLOW_VULNERABLE_DEMO:-}"
+
+x-vulnerable-app: &vulnerable-app
+  profiles: ["vulnerable"]
+  build:
+    context: .
+    target: app
+  image: racejack-app:local
+  user: "10001:10001"
+  networks: [demo]
+  tmpfs: ["/tmp:rw,noexec,nosuid,size=16m"]
+  command:
+    ["uvicorn", "racejack.vulnerable.app:app", "--host", "0.0.0.0", "--port", "8000"]
   healthcheck:
     test: ["CMD", "python", "-m", "racejack.healthcheck"]
     interval: 3s
@@ -78,6 +110,10 @@ services:
       - /var/lib/postgresql/data:uid=70,gid=70,mode=0750
       - /run/postgresql:uid=70,gid=70,mode=0750
       - /tmp:uid=70,gid=70
+    # Not performance tuning: the demonstration issues 60 concurrent requests, and a vulnerable
+    # replica holds a second connection per request for its instrumentation. This is the capacity
+    # that makes the demonstration possible at all.
+    command: ["postgres", "-c", "max_connections=400"]
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U racejack -d racejack -h 127.0.0.1"]
       interval: 2s
@@ -122,6 +158,25 @@ services:
     environment:
       <<: *runner-env
     command: ["python", "-m", "racejack.demo"]
+
+  # ---------------------------------------------------------------------------------------------
+  # INTENTIONALLY VULNERABLE. Two deliberate actions are required and neither alone is enough:
+  # the `vulnerable` profile selects these services, and ALLOW_VULNERABLE_DEMO=true acknowledges
+  # what they are. The default Compose path never starts them.
+  #
+  #   ALLOW_VULNERABLE_DEMO=true docker compose --profile vulnerable up --detach --wait vuln-a vuln-b
+  # ---------------------------------------------------------------------------------------------
+  vuln-a:
+    <<: [*hardening, *vulnerable-app]
+    environment:
+      <<: *vulnerable-env
+      RACEJACK_REPLICA_NAME: vuln-a
+
+  vuln-b:
+    <<: [*hardening, *vulnerable-app]
+    environment:
+      <<: *vulnerable-env
+      RACEJACK_REPLICA_NAME: vuln-b
 
   # The concurrent load harness. Generates genuine concurrent load against our own services
   # only, bounded by explicit configuration, and writes its transcript to ./artifacts.

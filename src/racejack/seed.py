@@ -14,6 +14,7 @@ import sys
 from . import fixtures, schema
 from .config import RunnerConfig
 from .db import Conn, connect
+from .instrumentation import create_instrumentation, drop_instrumentation
 
 
 async def create_schema(conn: Conn) -> None:
@@ -51,6 +52,38 @@ async def seed(database_url: str, *, create: bool = True) -> None:
         await reset_fixtures(conn)
 
 
+async def present_backstops(conn: Conn) -> set[str]:
+    """Which of the two named backstop constraints the store currently carries."""
+    cursor = await conn.execute(
+        schema.PRESENT_BACKSTOP_CONSTRAINTS, (list(schema.BACKSTOP_CONSTRAINTS),)
+    )
+    return {str(row["conname"]) for row in await cursor.fetchall()}
+
+
+async def prepare_secure_run(database_url: str) -> None:
+    """Fresh fixtures, the backstop in place, and no instrumentation anywhere."""
+    async with connect(database_url) as conn:
+        await create_schema(conn)
+        await reset_fixtures(conn)
+        # Order matters: the fixtures must be consistent again before the constraints can be
+        # re-added, since a previous vulnerable run may have left an oversold drop behind.
+        await conn.execute(schema.RESTORE_BACKSTOP_CONSTRAINTS)
+        await drop_instrumentation(conn)
+
+
+async def prepare_vulnerable_run(database_url: str) -> None:
+    """Fresh fixtures, the backstop deliberately removed, instrumentation tables available.
+
+    Removing the backstop is what lets the application-level damage show instead of surfacing as
+    a constraint violation. It is done by name, for vulnerable runs only, and the output says so.
+    """
+    async with connect(database_url) as conn:
+        await create_schema(conn)
+        await reset_fixtures(conn)
+        await conn.execute(schema.DROP_BACKSTOP_CONSTRAINTS)
+        await create_instrumentation(conn)
+
+
 async def _amain(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="racejack-seed",
@@ -61,8 +94,20 @@ async def _amain(argv: list[str] | None = None) -> int:
         action="store_true",
         help="reset fixture rows without re-running the schema DDL",
     )
+    parser.add_argument(
+        "--secure",
+        action="store_true",
+        help=(
+            "restore the secure baseline: fresh fixtures, both backstop constraints back in place, "
+            "and no instrumentation tables. Use after a vulnerable run."
+        ),
+    )
     args = parser.parse_args(argv)
     config = RunnerConfig.from_env()
+    if args.secure:
+        await prepare_secure_run(config.database_url)
+        print("secure baseline restored: backstop constraints in place, no instrumentation")
+        return 0
     await seed(config.database_url, create=not args.fixtures_only)
     print(
         f"seeded {fixtures.STORE_NAME}: drop {fixtures.DROP_ID} "

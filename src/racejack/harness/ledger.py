@@ -34,6 +34,14 @@ class ReproductionMode(StrEnum):
     NATURAL = "natural"
     """Genuine concurrent load with no instrumentation whatsoever in any code path."""
 
+    DETERMINISTIC = "deterministic"
+    """An instrumented synchronization point holds the window open, identically on every machine.
+
+    Vulnerable paths only. The window is a genuine property of check-then-act code; this only holds
+    it open long enough to observe, and the natural mode is the evidence that it exists without any
+    help. This is the mode that carries the required assertion that the defect happens.
+    """
+
 
 class Invariant(StrEnum):
     COUNTER = "counter"
@@ -140,13 +148,19 @@ class Reconciliation:
         # A vulnerable variant that happened not to lose a race this time proves nothing at all.
         return Verdict.INCONCLUSIVE
 
+    def summary(self) -> str:
+        """The ledger numbers on one line, for a failure detail."""
+        return " | ".join(self.as_lines()[:2])
+
     def as_lines(self) -> list[str]:
         """The reconciliation as a human reads it: the numbers that must agree, side by side."""
         led = self.ledger
         return [
             f"units available {led.units_available:>6}   "
-            f"orders confirmed {led.orders_confirmed:>6}   "
-            f"overrun {self.overrun:>6}   shortfall {self.shortfall:>6}",
+            f"units sold {led.units_sold:>6}   "
+            f"units remaining {led.units_remaining:>6}",
+            f"orders confirmed {led.orders_confirmed:>5}   "
+            f"overrun {self.overrun:>9}   shortfall {self.shortfall:>7}",
             f"code face value {led.code_face_value_cents:>6}   "
             f"redemptions      {led.redemptions:>6}   "
             f"credited {led.total_credited_cents:>6}   wallet    "

@@ -16,10 +16,10 @@ Everything here is invented. There are no real stores, buyers, products, promoti
 balances, or credentials, and nothing in this project contacts any system other than its own
 containers.
 
-> **Status — secure baseline plus the concurrent load harness.** This stage ships the storefront,
-> its topology, its *correct* implementations, and the instrument that makes concurrency
-> observable. There is still **no vulnerable code** here, so nothing in this repository yet
-> demonstrates the race itself — only that the guards hold when sixty buyers arrive at once.
+> **Status — in progress.** The storefront, both correct implementations, the concurrent load
+> harness, and the two *unguarded* check-then-act shapes are here. Still to come: the two half-fixes
+> that look like fixes and are not, both negative controls, the full regression matrix, and the
+> comparison CLI with the walkthrough.
 
 ## Run it
 
@@ -191,6 +191,98 @@ It measures **correctness under concurrency only**. It makes no throughput, late
 claim of any kind, none appears in its output, and a test asserts that none ever does. It is not a
 load-testing tool and must never become one.
 
+## The vulnerable application
+
+> **Intentionally broken educational material. Never deploy this.**
+
+Starting it takes **two** deliberate actions, and neither alone is enough:
+
+```sh
+ALLOW_VULNERABLE_DEMO=true docker compose --profile vulnerable up --detach --wait vuln-a vuln-b
+docker compose run --rm harness python -m racejack.harness --variant vulnerable --mode deterministic
+```
+
+The opt-in profile selects the service; the environment variable acknowledges what it is. The
+default Compose path never starts it, and the application refuses to construct itself without the
+acknowledgement — a profile can be enabled by copying a command line, so on its own it does not
+count as one.
+
+Its routes, credentials, read views, refusal responses, and success payloads are *literally the same
+code* as the secure application's (`src/racejack/api.py`). The entire difference is
+`vulnerable/shapes.py` versus `secure/guards.py`:
+
+```python
+#  secure — the check IS the write, one statement, decided on affected row count
+UPDATE drops SET units_sold = units_sold + 1
+ WHERE drop_id = %(drop_id)s AND units_sold < units_available
+
+#  vulnerable — a read, a decision, and then a separate write
+SELECT units_available, units_sold FROM drops WHERE drop_id = %(drop_id)s   # time of check
+...                                                                         # ← the window
+UPDATE drops SET units_sold = units_sold + 1 WHERE drop_id = %(drop_id)s    # time of use
+```
+
+Neither shape is exotic and neither looks wrong. That is why this class of defect survives code
+review, and why a green test suite does not catch it.
+
+### What it does under load
+
+Sixty concurrent buyers against a twelve-unit drop, and forty concurrent redemptions of one
+single-use code:
+
+```
+ units available     12   units sold     60   units remaining    -48
+ orders confirmed    60   overrun          48   shortfall        0
+ code face value   2500   redemptions      40   credited  100000   wallet   100000
+ VERDICT: INVARIANT VIOLATED   (vulnerable application, deterministic reproduction mode)
+```
+
+The store confirmed sixty orders for twelve units and reports **minus forty-eight** remaining. One
+credit code worth 2500 cents credited a wallet with 100 000.
+
+### The interleaving timeline
+
+The deterministic mode prints the requests that raced — the reads that observed the same value, and
+the writes that followed, with the serving replica on each line. That pair *is* the vulnerability:
+
+```
+    60 requests read DROP-2026-03 as 0 before any of them wrote
+      step     1  vuln-a   CHECK  order-00018    observed=0
+      step     2  vuln-a   CHECK  order-00034    observed=0
+      ...
+      step   132  vuln-b    ACT   order-00018    observed=7   decided on units_sold=0
+```
+
+### About the instrumentation, plainly
+
+The deterministic mode uses an explicitly labelled **instrumented synchronization point** that holds
+the time-of-check to time-of-use window open, so the interleaving is identical on every machine and
+every run. It lives only in vulnerable code paths, in tables that say what they are
+(`toctou_instrumentation_gate`, `toctou_timeline`), and a test asserts the secure application never
+so much as imports it.
+
+The window is a **genuine property of the code**. The instrumentation does not create it; it only
+holds it open long enough to observe. The evidence is the natural mode, which attaches nothing at
+all — no rendezvous, no recorded step, no wait — and still reproduces both overruns:
+
+```
+observed overrun rate (natural mode): 3/12 rounds, 98/600 requests
+rounds reported inconclusive: 9/12
+```
+
+Note what the other nine rounds are called. A natural run that observes no violation is
+**`inconclusive`** — never a pass, and never evidence the code is correct. Treating a quiet run as
+proof is exactly the reasoning error this project exists to correct.
+
+### Why the backstop comes off
+
+A vulnerable run drops `drops_units_sold_within_availability` and `redemptions_single_use` by name,
+and says so in its output. With them in place the unguarded write does not oversell the drop — it
+fails as a constraint violation, and the store returns an *error* instead of a negative remaining
+count. That is exactly what a backstop is for, and it is why a real system wants one. It is also why
+showing the application-level damage means taking it off first and being loud about it. The secure
+schema is untouched, and `python -m racejack.seed --secure` puts everything back.
+
 ## Layout
 
 ```
@@ -204,7 +296,10 @@ src/racejack/
   store.py       the store's own read-side views
   auditcheck.py  the gate that verifies those audit events in a captured log stream
   httpclient.py  the shared HTTP boundary; knows how to speak, not when
+  api.py         the HTTP boundary both variants share, so only the sequencing differs
+  instrumentation.py  the labelled synchronization point and the interleaving timeline
   secure/        the secure application: guards.py holds the three strategies
+  vulnerable/    the opt-in vulnerable application: shapes.py holds the unguarded pair
   demo/          the sequential demonstration runner
   harness/       the concurrent load harness: burst, ledger, engine, transcript
 tests/           the regression suite, run inside the same network
@@ -214,4 +309,6 @@ artifacts/       harness transcripts from the last run (disposable, gitignored)
 ## Safety
 
 This is local educational material. It is not a product, it is not hardened for anything but the
-demonstration, and it must not be deployed or exposed to a network you do not control.
+demonstration, and it must not be deployed or exposed to a network you do not control. The
+vulnerable application in particular is **deliberately broken** and exists only to be observed
+failing on a container network with no egress.

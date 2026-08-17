@@ -10,7 +10,7 @@ set -euo pipefail
 cd "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 cleanup() {
-  docker compose down --volumes --remove-orphans >/dev/null 2>&1 || true
+  docker compose --profile vulnerable down --volumes --remove-orphans >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 
@@ -41,11 +41,45 @@ step "sequential demonstration, addressing one replica (the run parameter is rea
 docker compose run --rm --no-deps -T -e RACEJACK_REPLICAS=1 demo >/dev/null
 echo "one-replica run completed successfully"
 
-step "concurrent load harness: genuine concurrent load against our own services only"
+step "concurrent load harness against the secure application"
 install -d -m 0777 artifacts
 docker compose run --rm --no-deps harness
 
+step "containment: the vulnerable application is not started by the default path"
+if docker compose ps --services | grep -qx 'vuln-a'; then
+  echo "the vulnerable application was started by the default Compose path" >&2
+  exit 1
+fi
+if docker compose config --services | grep -qx 'vuln-a'; then
+  echo "the vulnerable application is not behind an opt-in profile" >&2
+  exit 1
+fi
+echo "not selected without its opt-in profile"
+
+step "containment: the opt-in profile alone is not an acknowledgement"
+if docker compose --profile vulnerable run --rm --no-deps -T -e ALLOW_VULNERABLE_DEMO= vuln-a \
+     python -c "import racejack.vulnerable.app" >/dev/null 2>&1; then
+  echo "the vulnerable application started without ALLOW_VULNERABLE_DEMO=true" >&2
+  exit 1
+fi
+echo "refused to start without ALLOW_VULNERABLE_DEMO=true"
+
+step "starting the vulnerable application (both opt-in actions, and only now)"
+ALLOW_VULNERABLE_DEMO=true docker compose --profile vulnerable up --detach --wait vuln-a vuln-b
+
+step "vulnerable · deterministic mode — the defect is REQUIRED to reproduce"
+docker compose run --rm --no-deps -T harness \
+  python -m racejack.harness --variant vulnerable --mode deterministic
+
+step "vulnerable · natural mode — no instrumentation at all; reports only what it observed"
+docker compose run --rm --no-deps -T harness \
+  python -m racejack.harness --variant vulnerable --mode natural
+
+step "restoring the secure baseline before the suite runs"
+docker compose run --rm --no-deps -T harness python -m racejack.seed --secure
+
 step "ruff, mypy, and the test suite, through the same boundary"
-docker compose run --rm --no-deps verify
+RACEJACK_REQUIRE_VULNERABLE=1 docker compose run --rm --no-deps \
+  -e RACEJACK_REQUIRE_VULNERABLE=1 verify
 
 printf '\n==> verification complete\n'

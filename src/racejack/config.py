@@ -27,6 +27,7 @@ from . import fixtures
 
 DEFAULT_DATABASE_URL: Final = "postgresql://racejack:racejack-demo-password@db:5432/racejack"
 DEFAULT_REPLICA_URLS: Final = ("http://app-a:8000", "http://app-b:8000")
+DEFAULT_VULNERABLE_REPLICA_URLS: Final = ("http://vuln-a:8000", "http://vuln-b:8000")
 
 DEFAULT_ORDER_CONCURRENCY: Final = 60
 """Sixty concurrent buyers against a twelve-unit drop, as the demonstration describes."""
@@ -98,20 +99,23 @@ class RunnerConfig:
     replica_urls: tuple[str, ...]
     """The replicas actually addressed, already narrowed to ``RACEJACK_REPLICAS`` entries."""
 
+    vulnerable_replica_urls: tuple[str, ...]
+    """The vulnerable replicas, narrowed the same way. Empty unless that opt-in profile is up."""
+
     request_timeout_seconds: float
+
+    def urls_for(self, variant: str) -> tuple[str, ...]:
+        return self.vulnerable_replica_urls if variant == "vulnerable" else self.replica_urls
 
     @classmethod
     def from_env(cls, env: dict[str, str] | None = None) -> RunnerConfig:
         source = os.environ if env is None else env
-        available = tuple(
-            url.strip()
-            for url in source.get("RACEJACK_REPLICA_URLS", ",".join(DEFAULT_REPLICA_URLS)).split(
-                ","
-            )
-            if url.strip()
-        )
+        available = _replica_list(source, "RACEJACK_REPLICA_URLS", DEFAULT_REPLICA_URLS)
         if not available:
             raise ValueError("RACEJACK_REPLICA_URLS must name at least one replica")
+        vulnerable = _replica_list(
+            source, "RACEJACK_VULNERABLE_REPLICA_URLS", DEFAULT_VULNERABLE_REPLICA_URLS
+        )
         replicas = int(source.get("RACEJACK_REPLICAS", str(len(available))))
         if not 1 <= replicas <= len(available):
             raise ValueError(
@@ -120,8 +124,17 @@ class RunnerConfig:
         return cls(
             database_url=source.get("RACEJACK_DATABASE_URL", DEFAULT_DATABASE_URL),
             replica_urls=available[:replicas],
+            vulnerable_replica_urls=vulnerable[:replicas],
             request_timeout_seconds=float(source.get("RACEJACK_REQUEST_TIMEOUT_SECONDS", "30")),
         )
+
+
+def _replica_list(
+    source: dict[str, str] | Any, name: str, default: tuple[str, ...]
+) -> tuple[str, ...]:
+    return tuple(
+        url.strip() for url in source.get(name, ",".join(default)).split(",") if url.strip()
+    )
 
 
 def _bounded_int(source: dict[str, str] | Any, name: str, default: int, ceiling: int) -> int:

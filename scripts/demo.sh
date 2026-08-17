@@ -10,7 +10,7 @@ set -euo pipefail
 cd "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 cleanup() {
-  docker compose down --volumes --remove-orphans >/dev/null 2>&1 || true
+  docker compose --profile vulnerable down --volumes --remove-orphans >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 
