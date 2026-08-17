@@ -5,6 +5,7 @@ description = "Educational demonstration of check-then-act (TOCTOU) races on sha
 readme = "README.md"
 requires-python = ">=3.13,<3.14"
 license = "MIT"
+license-files = ["LICENSE"]
 dependencies = [
     "fastapi>=0.115,<0.117",
     "uvicorn>=0.34,<0.36",

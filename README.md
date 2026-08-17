@@ -23,6 +23,32 @@ containers.
 **New here?** [`WALKTHROUGH.md`](WALKTHROUGH.md) is the long version: the mechanism, the CWE/OWASP
 terminology with its caveat, all four shapes, both controls, both fixes, and what to take away.
 
+## What this is, and what it is not
+
+This is **educational material**, written to make one defect class legible. Read this before running
+anything:
+
+- **It runs locally, under Docker Compose, and nowhere else.** There is no hosted service, no public
+  endpoint, and no deployment configuration. Nothing here is published as a package or a container
+  image.
+- **It ships a component that is intentionally vulnerable.** The vulnerable application is
+  deliberately broken and exists only to be watched failing. It cannot start from the default path:
+  it needs the `vulnerable` Compose profile *and* `ALLOW_VULNERABLE_DEMO=true`, both supplied on
+  purpose.
+- **It makes no production-safety claim.** Nothing here is hardened for anything but the
+  demonstration, and there is no service-level, support-duration, or compatibility promise. Do not
+  deploy it, and do not expose it to a network you do not control.
+- **It is not a load-testing tool.** The harness generates concurrency to expose a race. It makes no
+  throughput or latency claim about anything, and it never will.
+- **Everything in it is invented**, including the store, the buyers, the products, the promotional
+  code, the wallet balances, and the credentials.
+
+The demonstrated race condition is the *subject* of this project, not a bug to report —
+[`SECURITY.md`](SECURITY.md) draws that line and gives a private path for reporting anything
+*unintended*. [`CONTRIBUTING.md`](CONTRIBUTING.md) covers how to run the one verification command
+and the constraints a change has to respect. The project is released under the
+[MIT License](LICENSE).
+
 ## Run it
 
 You need Docker. You do not need PostgreSQL, a Python environment, or any host tuning.
@@ -422,3 +448,12 @@ This is local educational material. It is not a product, it is not hardened for 
 demonstration, and it must not be deployed or exposed to a network you do not control. The
 vulnerable application in particular is **deliberately broken** and exists only to be observed
 failing on a container network with no egress.
+
+To report something *unintended* — as opposed to the race this project exists to show — use the
+private path in [`SECURITY.md`](SECURITY.md).
+
+## License
+
+[MIT](LICENSE) © 2026 maximalfocus.
+
+Contributions are welcome under the same license; see [`CONTRIBUTING.md`](CONTRIBUTING.md).
