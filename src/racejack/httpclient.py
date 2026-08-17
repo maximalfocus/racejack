@@ -25,6 +25,7 @@ REPLICA_HEADER: Final = "X-Racejack-Replica"
 GUARD_HEADER: Final = "X-Racejack-Guard"
 INSTRUMENTED_WINDOW_HEADER: Final = "X-Racejack-Instrumented-Window"
 INSTRUMENTED_WINDOW_HOLD: Final = "hold"
+SHAPE_HEADER: Final = "X-Racejack-Shape"
 
 
 @dataclass(frozen=True, slots=True)
@@ -139,11 +140,13 @@ class StorefrontHTTP:
 
     @staticmethod
     def _demonstration_headers(
-        *, guard: str | None = None, instrumented: bool = False
+        *, guard: str | None = None, shape: str | None = None, instrumented: bool = False
     ) -> dict[str, str] | None:
         headers: dict[str, str] = {}
         if guard:
             headers[GUARD_HEADER] = guard
+        if shape:
+            headers[SHAPE_HEADER] = shape
         if instrumented:
             # Deterministic reproduction mode. Absent — the default — nothing runs at all.
             headers[INSTRUMENTED_WINDOW_HEADER] = INSTRUMENTED_WINDOW_HOLD
@@ -156,6 +159,7 @@ class StorefrontHTTP:
         sequence: int,
         buyer_index: int,
         guard: str | None = None,
+        shape: str | None = None,
         instrumented: bool = False,
     ) -> RequestRecord:
         return await self.send(
@@ -164,7 +168,9 @@ class StorefrontHTTP:
             operation="order",
             sequence=sequence,
             buyer_index=buyer_index,
-            extra_headers=self._demonstration_headers(guard=guard, instrumented=instrumented),
+            extra_headers=self._demonstration_headers(
+                guard=guard, shape=shape, instrumented=instrumented
+            ),
         )
 
     async def redeem(

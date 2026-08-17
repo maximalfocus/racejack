@@ -17,9 +17,8 @@ balances, or credentials, and nothing in this project contacts any system other 
 containers.
 
 > **Status — in progress.** The storefront, both correct implementations, the concurrent load
-> harness, and the two *unguarded* check-then-act shapes are here. Still to come: the two half-fixes
-> that look like fixes and are not, both negative controls, the full regression matrix, and the
-> comparison CLI with the walkthrough.
+> harness, the full four-shape vulnerable ladder, both negative controls, and the regression matrix
+> are here. Still to come: the comparison CLI and the educational walkthrough.
 
 ## Run it
 
@@ -274,6 +273,77 @@ Note what the other nine rounds are called. A natural run that observes no viola
 **`inconclusive`** — never a pass, and never evidence the code is correct. Treating a quiet run as
 proof is exactly the reasoning error this project exists to correct.
 
+### The other two shapes: both look like fixes
+
+**Half-fix 1 — the process-scoped lock.** The same check-then-act, wrapped in an ordinary
+`asyncio.Lock`, used completely correctly:
+
+```
+ counter · shape: process_lock · replicas addressed: 1
+  units available     12   units sold     12   units remaining      0
+  orders confirmed    12   overrun         0   shortfall       0
+
+ counter · shape: process_lock · replicas addressed: 2
+  units available     12   units sold     13   units remaining     -1
+  orders confirmed    13   overrun         1   shortfall       0
+```
+
+Same code. Same fixture state. Same burst. The only variable that changed is **how many processes
+share the state** — and behind one replica the lock is genuinely holding the invariant, which is
+precisely what makes it dangerous. A lock protects an invariant only if its scope contains **every
+writer of that invariant**, and this invariant lives in the database.
+
+**Half-fix 2 — the single transaction.** The same read-check-write inside one transaction, at the
+isolation level the run reads back from the database itself:
+
+```
+ counter · shape: single_transaction · replicas addressed: 2
+  units available     12   units sold     60   units remaining    -48
+  orders confirmed    60   overrun        48   shortfall       0
+  isolation in effect  read committed
+```
+
+Unchanged. A transaction buys **atomicity** — all of it happens or none of it does — and durability.
+The lost update it would have to prevent is neither; it is an **isolation** property. At the
+`READ COMMITTED` default a statement sees whatever was committed when that statement began, so two
+transactions can each read the same value and each go on to write. `SERIALIZABLE` with
+retry-on-conflict *is* a correct transactional answer; this variant deliberately does not use it.
+
+## The two controls: what a race is *not*
+
+**Sequential execution passes.** The identical vulnerable code, one request at a time:
+
+```
+ counter · shape: unguarded · replicas addressed: 2 · sequential
+  units available     12   units sold     12   units remaining      0
+  orders confirmed    12   overrun         0   shortfall       0
+  requests issued  orders    60 (refused 48)
+```
+
+Perfect. Every functional assertion satisfied, the ledger reconciling exactly. **This is why the
+defect ships** — past code review, past a green test suite — and it is why the run is still labelled
+`inconclusive` rather than passing. A sequential test cannot construct the interleaving that breaks
+check-then-act, so it can never be evidence of correctness for this class.
+
+**Throttling narrows the window without closing it.** A client that keeps only *N* requests in
+flight at once, against the single-use code:
+
+| in flight at once | redemptions | wallet | overrun |
+|---|---|---|---|
+| 40 | 40 | 100 000 | **39** |
+| 8 | 8 | 20 000 | **7** |
+| 2 | 2 | 5 000 | **1** |
+
+The damage falls exactly as the window narrows, and never reaches zero. A rate limit, an added
+delay, a queue, or a slower caller reduces the **probability** of a race and never its
+**possibility**. A defect that appears only under load is still a defect at any load.
+
+(The series runs on the single-use invariant deliberately: there the arithmetic is exact — the first
+*N* requests all read "not redeemed" and all redeem, so the overrun is *N−1* for every *N*. On the
+counter the same model produces a sawtooth, because a window that happens to divide the remaining
+stock lands the batches exactly on the boundary. That is a coincidence of the model, not anything
+true about throttling, and a control should not be built on one.)
+
 ### Why the backstop comes off
 
 A vulnerable run drops `drops_units_sold_within_availability` and `redemptions_single_use` by name,
@@ -299,7 +369,7 @@ src/racejack/
   api.py         the HTTP boundary both variants share, so only the sequencing differs
   instrumentation.py  the labelled synchronization point and the interleaving timeline
   secure/        the secure application: guards.py holds the three strategies
-  vulnerable/    the opt-in vulnerable application: shapes.py holds the unguarded pair
+  vulnerable/    the opt-in vulnerable application: shapes.py holds all four shapes
   demo/          the sequential demonstration runner
   harness/       the concurrent load harness: burst, ledger, engine, transcript
 tests/           the regression suite, run inside the same network

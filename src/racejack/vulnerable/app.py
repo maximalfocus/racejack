@@ -18,22 +18,23 @@ import psycopg
 from fastapi import FastAPI, Header, HTTPException, Request, Response, status
 
 from ..api import (
+    SHAPE_HEADER,
     add_common_routes,
+    bad_request,
     finish_order,
     finish_redemption,
     pool_of,
     require_buyer,
     stamp_requests,
 )
-from ..config import AppConfig
+from ..config import AppConfig, VulnerableShape, parse_vulnerable_shape
 from ..db import ConnPool, make_pool
 from ..instrumentation import Instrumentation
 from ..models import OrderResponse, RedemptionRequest, RedemptionResponse
 from .acknowledgement import require_acknowledgement
-from .shapes import place_order_unguarded, redeem_unguarded
+from .shapes import COUNTER_SHAPES, redeem_unguarded
 
 VARIANT = "vulnerable"
-SHAPE = "unguarded"
 
 INSTRUMENTATION_HEADER: Final = "X-Racejack-Instrumented-Window"
 INSTRUMENTATION_ON: Final = "hold"
@@ -85,10 +86,16 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     )
     app.state.config = settings
     stamp_requests(app, settings.replica_name)
-    add_common_routes(app, settings, variant=VARIANT, strategy=SHAPE)
+    add_common_routes(app, settings, variant=VARIANT, strategy=VulnerableShape.UNGUARDED.value)
 
     def instrumented(raw: str | None) -> bool:
         return (raw or "").strip().lower() == INSTRUMENTATION_ON
+
+    def selected_shape(raw: str | None) -> VulnerableShape:
+        shape = parse_vulnerable_shape(raw)
+        if shape is None:
+            raise bad_request()
+        return shape
 
     @app.post(
         "/drops/{drop_id}/orders",
@@ -98,16 +105,20 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     async def place_order(
         drop_id: str,
         request: Request,
+        response: Response,
         authorization: Annotated[str | None, Header()] = None,
         x_racejack_instrumented_window: Annotated[str | None, Header()] = None,
+        x_racejack_shape: Annotated[str | None, Header()] = None,
     ) -> OrderResponse:
         buyer_id = require_buyer(authorization)
         hold = instrumented(x_racejack_instrumented_window)
+        shape = selected_shape(x_racejack_shape)
+        response.headers[SHAPE_HEADER] = shape.value
         async with (
             pool_of(request).connection() as conn,
             instrumentation_pool_of(request).connection() as instrumentation_conn,
         ):
-            result = await place_order_unguarded(
+            result = await COUNTER_SHAPES[shape](
                 conn,
                 Instrumentation(instrumentation_conn, replica=settings.replica_name, enabled=hold),
                 drop_id=drop_id,

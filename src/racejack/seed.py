@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import sys
+import uuid
 
 from . import fixtures, schema
 from .config import RunnerConfig
@@ -50,6 +51,35 @@ async def seed(database_url: str, *, create: bool = True) -> None:
         if create:
             await create_schema(conn)
         await reset_fixtures(conn)
+
+
+async def pre_sell_units(conn: Conn, count: int) -> None:
+    """Sell ``count`` units before a burst arrives, with the order records to match.
+
+    Used to put the drop one unit from sold out, so that a burst arrives at the single moment the
+    invariant is actually contested. The order rows are real, so the ledger still reconciles: a
+    fixture that quietly moved the counter without them would manufacture a discrepancy and then
+    report it as a finding.
+    """
+    if count < 0:
+        raise ValueError(f"cannot pre-sell {count} units")
+    async with conn.transaction():
+        await conn.cursor().executemany(
+            "INSERT INTO orders (order_id, drop_id, buyer_id, units, served_by)"
+            " VALUES (%s, %s, %s, 1, %s)",
+            [
+                (
+                    uuid.uuid5(uuid.NAMESPACE_URL, f"racejack:pre-sold:{index}"),
+                    fixtures.DROP_ID,
+                    fixtures.buyer_id(index),
+                    "fixture",
+                )
+                for index in range(1, count + 1)
+            ],
+        )
+        await conn.execute(
+            "UPDATE drops SET units_sold = %s WHERE drop_id = %s", (count, fixtures.DROP_ID)
+        )
 
 
 async def present_backstops(conn: Conn) -> set[str]:
