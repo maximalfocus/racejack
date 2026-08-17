@@ -1,10 +1,10 @@
 """A scope tripwire for this stage of the project.
 
-The secure baseline and the concurrent load harness are both meant to land with *no vulnerable
-code present*, and the secure application must never gain an unguarded path. This module fails if a
-vulnerable entry point, an instrumented synchronization point, or a concurrent load harness appears
-before the change that is supposed to introduce it — at which point these tests are retired
-deliberately rather than by accident.
+The concurrent load harness has landed; the vulnerable ladder has not. Until it does, no
+vulnerable entry point and no instrumented synchronization point may exist, the secure application
+must never gain an unguarded path, and the *demonstration runner* must stay strictly sequential so
+it cannot quietly start claiming a concurrency property it does not test. Each of these is retired
+deliberately, by the change that is supposed to introduce what it forbids.
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ import racejack
 
 PACKAGE_ROOT = Path(racejack.__file__).resolve().parent
 
-FORBIDDEN_MODULE_NAMES = ("vulnerable", "harness", "instrumented")
+FORBIDDEN_MODULE_NAMES = ("vulnerable", "instrumented")
 CONCURRENCY_PRIMITIVES = re.compile(
     r"\b(asyncio\.(?:gather|TaskGroup|Semaphore)|create_task|to_thread)\b"
 )
@@ -26,7 +26,7 @@ def _python_sources() -> list[Path]:
     return sorted(PACKAGE_ROOT.rglob("*.py"))
 
 
-def test_no_vulnerable_or_harness_module_exists_yet() -> None:
+def test_no_vulnerable_module_exists_yet() -> None:
     offenders = [
         str(path.relative_to(PACKAGE_ROOT))
         for path in _python_sources()

@@ -16,9 +16,10 @@ Everything here is invented. There are no real stores, buyers, products, promoti
 balances, or credentials, and nothing in this project contacts any system other than its own
 containers.
 
-> **Status — secure baseline.** This stage ships the storefront, its topology, and its *correct*
-> implementations only. There is no vulnerable code and no concurrent load harness here yet, and
-> therefore nothing in this repository yet demonstrates the race itself.
+> **Status — secure baseline plus the concurrent load harness.** This stage ships the storefront,
+> its topology, its *correct* implementations, and the instrument that makes concurrency
+> observable. There is still **no vulnerable code** here, so nothing in this repository yet
+> demonstrates the race itself — only that the guards hold when sixty buyers arrive at once.
 
 ## Run it
 
@@ -32,8 +33,17 @@ That brings up two application replicas over one PostgreSQL instance on a contai
 egress, seeds fresh fictional fixtures, runs the sequential demonstration, prints a reconciled
 ledger, and tears everything down again. It takes well under five minutes once images are built.
 
-The full gate — the demonstration, the audit-event check, Ruff, mypy, and the test suite, all
-through the same Compose boundary that CI uses:
+The concurrent load harness — sixty buyers arriving at the twelve-unit drop at the same moment,
+forty redemptions of one single-use code at the same moment, across every guard and every replica
+count:
+
+```sh
+docker compose up --detach --wait app-a app-b
+docker compose run --rm harness
+```
+
+The full gate — the sequential demonstration, the audit-event check, the harness, Ruff, mypy, and
+the test suite, all through the same Compose boundary that CI uses:
 
 ```sh
 bash scripts/verify.sh
@@ -45,6 +55,9 @@ bash scripts/verify.sh
 |---|---|---|
 | `RACEJACK_REPLICAS` | `1`, `2` (default `2`) | how many of the running replicas the runner addresses |
 | `RACEJACK_COUNTER_GUARD` | `conditional_write` (default), `pessimistic_lock` | the counter strategy a replica uses when a request does not ask for one |
+| `RACEJACK_ORDER_CONCURRENCY` | 1–96 (default `60`) | concurrent buyers per burst |
+| `RACEJACK_REDEMPTION_CONCURRENCY` | 1–96 (default `40`) | concurrent redemptions per burst |
+| `RACEJACK_ROUNDS` | 1–20 (default `3`) | how many times each harness scenario repeats |
 
 The replica count is a **demonstration parameter, not deployment detail**. The number of processes
 that share the state is the difference between a lock that works and a lock that only appeared to,
@@ -128,8 +141,55 @@ rather than into correct behaviour.
 `scripts/demo.sh` exercises the store one request at a time, and a sequential run cannot construct
 the interleaving that breaks a check-then-act sequence. Correct behaviour under sequential load is
 therefore **not** evidence of correct behaviour under concurrent load — which is precisely why this
-class of defect survives code review and a green test suite. Establishing the concurrent property
-needs a concurrent load harness, and that is the next thing this project gains.
+class of defect survives code review and a green test suite.
+
+## The concurrent load harness
+
+The harness is how the project stops taking the sequential run's word for it. Every request in a
+burst gets its own task, each task's first action is to wait on a barrier, and they all leave the
+starting line together when the last one arrives. The number of tasks *is* the bound: the load is
+explicit configuration, aimed only at the demonstration's own services, on a network with no egress.
+
+Every run ends in a reconciliation that puts the numbers that must agree next to each other:
+
+```
+units available     12   orders confirmed     12   overrun      0   shortfall      0
+code face value   2500   redemptions           1   credited   2500   wallet      2500
+VERDICT: INVARIANT HELD   (secure application, natural reproduction mode)
+```
+
+Against the secure application the assertion is **exact**: not "no more than twelve orders" but
+*exactly* twelve — not fewer — and *exactly* one credit, with zero violations in every round, at one
+replica and at two, and canonical state byte-for-byte identical to a correct sequential run of the
+same request count. That exactness does double duty. It shows the fix preserves legitimate work
+instead of protecting the invariant by refusing valid requests, and it is the strongest available
+evidence that the harness is genuinely concurrent — a client that quietly serialized its own
+requests could never spread a burst across two replicas.
+
+The harness writes a transcript to `artifacts/harness-transcript.txt` carrying every per-request
+record behind those claims: the buyer, the replica addressed, the replica that **served** it, the
+status, the outcome, and the request id that matches the store's own audit event. No token, secret,
+or personal datum reaches it.
+
+### Zero violations means two different things
+
+The **natural** reproduction mode runs with no instrumentation whatsoever in any code path and
+reports the overrun rate it observed. What that rate means depends entirely on what was being
+driven:
+
+- against the **secure** application, zero violations is an exact assertion and a pass — a
+  secure-side violation would be a genuine failure, never a flake to retry away;
+- against a **vulnerable** application, a run that happens to observe nothing is **`inconclusive`**
+  — never a pass, and never evidence that the code is correct.
+
+Concluding otherwise from a quiet run is exactly the reasoning error this project exists to correct,
+so the verdict classifier distinguishes the two cases rather than leaving it to a reader.
+
+### What the harness is not
+
+It measures **correctness under concurrency only**. It makes no throughput, latency, or performance
+claim of any kind, none appears in its output, and a test asserts that none ever does. It is not a
+load-testing tool and must never become one.
 
 ## Layout
 
@@ -143,9 +203,12 @@ src/racejack/
   audit.py       the generic rejection audit event
   store.py       the store's own read-side views
   auditcheck.py  the gate that verifies those audit events in a captured log stream
+  httpclient.py  the shared HTTP boundary; knows how to speak, not when
   secure/        the secure application: guards.py holds the three strategies
   demo/          the sequential demonstration runner
+  harness/       the concurrent load harness: burst, ledger, engine, transcript
 tests/           the regression suite, run inside the same network
+artifacts/       harness transcripts from the last run (disposable, gitignored)
 ```
 
 ## Safety
