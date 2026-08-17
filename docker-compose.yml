@@ -1,0 +1,146 @@
+# The whole demonstration, on one hermetic container network with no egress.
+#
+# Two properties of this file are part of the mechanism rather than deployment detail:
+#
+#   * `app-a` and `app-b` are two separate processes sharing one database. An invariant held only
+#     inside one process is not held at all once a second process writes the same rows, and this
+#     project exists to make that visible.
+#   * the `demo` network is `internal: true`, so nothing here can reach anything outside it, and no
+#     service publishes a port. The database in particular is unreachable from the host.
+#
+# The database's data directory lives on tmpfs, so no run inherits another run's state and nothing
+# persists on the host.
+
+name: racejack
+
+x-hardening: &hardening
+  cap_drop: ["ALL"]
+  security_opt: ["no-new-privileges:true"]
+  read_only: true
+  restart: "no"
+
+x-store-env: &store-env
+  RACEJACK_DATABASE_URL: postgresql://racejack:racejack-demo-password@db:5432/racejack
+
+x-runner-env: &runner-env
+  RACEJACK_DATABASE_URL: postgresql://racejack:racejack-demo-password@db:5432/racejack
+  RACEJACK_REPLICA_URLS: "http://app-a:8000,http://app-b:8000"
+  # A documented run parameter: how many of the running replicas the runner addresses (1 or 2).
+  RACEJACK_REPLICAS: "${RACEJACK_REPLICAS:-2}"
+
+x-app: &app
+  build:
+    context: .
+    target: app
+  image: racejack-app:local
+  user: "10001:10001"
+  networks: [demo]
+  tmpfs: ["/tmp:rw,noexec,nosuid,size=16m"]
+  healthcheck:
+    test: ["CMD", "python", "-m", "racejack.healthcheck"]
+    interval: 3s
+    timeout: 5s
+    retries: 30
+    start_period: 3s
+  depends_on:
+    db:
+      condition: service_healthy
+    seed:
+      condition: service_completed_successfully
+
+x-runner: &runner
+  build:
+    context: .
+    target: app
+  image: racejack-app:local
+  user: "10001:10001"
+  networks: [demo]
+  tmpfs: ["/tmp:rw,noexec,nosuid,size=16m"]
+  depends_on:
+    app-a:
+      condition: service_healthy
+    app-b:
+      condition: service_healthy
+
+services:
+  db:
+    <<: *hardening
+    image: postgres:17-alpine
+    user: "70:70"
+    networks: [demo]
+    # No `ports:` — deliberately. The store is reachable only from inside this network.
+    environment:
+      POSTGRES_USER: racejack
+      POSTGRES_PASSWORD: racejack-demo-password
+      POSTGRES_DB: racejack
+      PGDATA: /var/lib/postgresql/data/pgdata
+    tmpfs:
+      - /var/lib/postgresql/data:uid=70,gid=70,mode=0750
+      - /run/postgresql:uid=70,gid=70,mode=0750
+      - /tmp:uid=70,gid=70
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U racejack -d racejack -h 127.0.0.1"]
+      interval: 2s
+      timeout: 3s
+      retries: 40
+      start_period: 2s
+
+  # One-shot: create the schema and rebuild the fictional fixtures from scratch.
+  seed:
+    <<: *hardening
+    build:
+      context: .
+      target: app
+    image: racejack-app:local
+    user: "10001:10001"
+    networks: [demo]
+    tmpfs: ["/tmp:rw,noexec,nosuid,size=16m"]
+    environment:
+      <<: *store-env
+    command: ["python", "-m", "racejack.seed"]
+    depends_on:
+      db:
+        condition: service_healthy
+
+  app-a:
+    <<: [*hardening, *app]
+    environment:
+      <<: *store-env
+      RACEJACK_REPLICA_NAME: app-a
+      RACEJACK_COUNTER_GUARD: "${RACEJACK_COUNTER_GUARD:-conditional_write}"
+
+  app-b:
+    <<: [*hardening, *app]
+    environment:
+      <<: *store-env
+      RACEJACK_REPLICA_NAME: app-b
+      RACEJACK_COUNTER_GUARD: "${RACEJACK_COUNTER_GUARD:-conditional_write}"
+
+  # The sequential demonstration. Speaks only HTTP once the fixtures are seeded.
+  demo:
+    <<: [*hardening, *runner]
+    environment:
+      <<: *runner-env
+    command: ["python", "-m", "racejack.demo"]
+
+  # Ruff, mypy, and the test suite, through the same boundary as everything else.
+  verify:
+    <<: [*hardening, *runner]
+    build:
+      context: .
+      target: verify
+    image: racejack-verify:local
+    # Ruff and mypy keep their caches under /tmp, so this one needs more room than the others.
+    tmpfs: ["/tmp:rw,noexec,nosuid,size=512m"]
+    environment:
+      <<: *runner-env
+    command:
+      - "sh"
+      - "-c"
+      - "ruff check . && ruff format --check . && mypy && pytest -p no:cacheprovider"
+
+networks:
+  demo:
+    name: racejack-demo
+    driver: bridge
+    internal: true
