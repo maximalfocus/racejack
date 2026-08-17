@@ -7,6 +7,7 @@ import asyncio
 import sys
 from pathlib import Path
 
+from ..artifacts import persist
 from ..config import HarnessConfig
 from .engine import build_comparison
 from .table import render
@@ -36,13 +37,12 @@ async def _amain(argv: list[str] | None = None) -> int:
     print(rendered)
 
     if args.output is not None:
-        try:
-            args.output.parent.mkdir(parents=True, exist_ok=True)
-            args.output.write_text(rendered + "\n")
-        except OSError as exc:
-            print(f"could not write the comparison to {args.output}: {exc}", file=sys.stderr)
-            return 1
-        print(f"comparison written to {args.output}")
+        failure = persist(args.output, rendered + "\n")
+        if failure is None:
+            print(f"comparison written to {args.output}")
+        else:
+            # Loud, and deliberately not fatal: the comparison is already on the page above.
+            print(f"\nWARNING: {failure}", file=sys.stderr)
 
     if not comparison.rows:
         print("nothing could be compared", file=sys.stderr)

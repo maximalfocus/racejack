@@ -269,34 +269,47 @@ def _check_no_oracle(report: Report) -> None:
     print()
 
 
-def _print_summary(report: Report) -> None:
-    print(RULE)
-    print(" Reconciliation")
-    print(RULE)
+def summary_lines(report: Report) -> list[str]:
+    """The closing reconciliation and verdict, as lines, so a test can read what a user reads."""
+    lines = [RULE, " Reconciliation", RULE]
     for check in report.checks:
-        print(f"  [{'PASS' if check.passed else 'FAIL'}] {check.description}")
+        lines.append(f"  [{'PASS' if check.passed else 'FAIL'}] {check.description}")
         if not check.passed:
-            print(f"         {check.detail}")
-    print()
-    print(RULE)
+            lines.append(f"         {check.detail}")
+    lines += ["", RULE]
     if report.passed:
-        print(" VERDICT: both invariants held, sequentially, through the store's own boundary.")
-        print()
-        print(" What this run does NOT establish: a sequential run cannot construct the request")
-        print(" interleaving that breaks a check-then-act sequence. Correct behaviour here is not")
-        print(" evidence of correct behaviour under concurrent load — proving that needs a")
-        print(" concurrent load harness, which this stage of the project does not yet have.")
+        lines += [
+            " VERDICT: both invariants held, sequentially, through the store's own boundary.",
+            "",
+            " What this run does NOT establish: a sequential run cannot construct the request",
+            " interleaving that breaks a check-then-act sequence, so correct behaviour here is",
+            " not evidence of correct behaviour under concurrent load. Nothing about this run",
+            " says anything at all about what happens when sixty buyers arrive at once.",
+            "",
+            " That question has its own instrument. To put genuine concurrent load through the",
+            " same store:",
+            "",
+            "     docker compose run --rm harness",
+            "",
+            " and to see every scenario side by side — both secure strategies, all four",
+            " vulnerable shapes, both reproduction modes, and both controls:",
+            "",
+            "     docker compose run --rm compare",
+        ]
     else:
-        print(" VERDICT: FAILED — a secure-side expectation was not met. That is a genuine")
-        print(" failure, never a flake to be retried away.")
-    print(RULE)
-    print(
+        lines += [
+            " VERDICT: FAILED — a secure-side expectation was not met. That is a genuine",
+            " failure, never a flake to be retried away.",
+        ]
+    lines.append(RULE)
+    lines.append(
         "racejack-demo-summary: "
         + json.dumps(
             {"passed": report.passed, "refusals": report.refusals, "checks": len(report.checks)},
             sort_keys=True,
         )
     )
+    return lines
 
 
 async def run(config: RunnerConfig) -> int:
@@ -311,5 +324,5 @@ async def run(config: RunnerConfig) -> int:
         await _redemption_scenario(client, config, report)
         await _credential_scenario(client, config, report)
     _check_no_oracle(report)
-    _print_summary(report)
+    print("\n".join(summary_lines(report)))
     return 0 if report.passed else 1

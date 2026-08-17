@@ -7,6 +7,7 @@ import asyncio
 import sys
 from pathlib import Path
 
+from ..artifacts import persist
 from ..config import HarnessConfig
 from .engine import Harness
 from .ledger import ReproductionMode, Variant
@@ -62,14 +63,14 @@ async def _amain(argv: list[str] | None = None) -> int:
 
     if not args.no_transcript:
         path = args.transcript or _transcript_path(config, variant, mode)
-        try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(render_transcript(report, config))
-        except OSError as exc:
-            print(f"could not write the transcript to {path}: {exc}", file=sys.stderr)
-            return 1
-        print(f"transcript written to {path}")
+        failure = persist(path, render_transcript(report, config))
+        if failure is None:
+            print(f"transcript written to {path}")
+        else:
+            # Loud, and deliberately not fatal: the demonstration already reached its verdict.
+            print(f"\nWARNING: {failure}", file=sys.stderr)
 
+    # The exit status reports the demonstration, and nothing else.
     return 0 if report.passed else 1
 
 
