@@ -19,7 +19,9 @@ RUN groupadd --gid 10001 racejack \
  && useradd --uid 10001 --gid 10001 --no-create-home --shell /usr/sbin/nologin racejack
 
 WORKDIR /app
-COPY pyproject.toml uv.lock README.md ./
+# LICENSE is copied here rather than only into `verify`, because `pyproject.toml` names it in
+# `license-files`: the wheel build resolves it, so a build context without it fails outright.
+COPY pyproject.toml uv.lock README.md LICENSE ./
 
 
 FROM base AS runtime-deps
@@ -40,7 +42,8 @@ ENV RUFF_CACHE_DIR=/tmp/ruff-cache \
 RUN --mount=type=cache,target=/root/.cache/uv uv sync --frozen --no-install-project
 COPY src ./src
 COPY tests ./tests
-COPY docker-compose.yml WALKTHROUGH.md ./
+COPY docker-compose.yml WALKTHROUGH.md SECURITY.md CONTRIBUTING.md ./
+COPY scripts ./scripts
 RUN --mount=type=cache,target=/root/.cache/uv uv sync --frozen --no-editable
 USER 10001:10001
 CMD ["pytest", "-p", "no:cacheprovider"]
